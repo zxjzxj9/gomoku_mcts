@@ -59,16 +59,23 @@ trains fine — but untreated they waste most of an overnight run.
 
 ### Mitigations (all required)
 
-- **Color-paired openings.** Sample a random opening of 1-2 plies, then play that
-  same opening twice with the colors swapped. Every opening therefore appears in
-  the buffer with both outcomes, so predicting from side-to-move alone no longer
-  reduces the loss. The network is forced to evaluate the position. The same
-  pairing rule is used in the arena so ratings are color-neutral.
-- **Dirichlet noise at the root**, epsilon = 0.25, alpha ≈ 10 / (average legal
-  moves) — approximately 0.15 for 9x9, 0.05 for 15x15.
-- **Temperature 1.0 for the first N plies**, where N ≈ the board dimension, then
-  temperature → 0 (argmax) for the remainder of the game.
+- **Randomised multi-ply openings.** Each self-play game begins with 2-4 random
+  plies drawn from cells near the centre. This is the measure that actually
+  decorrelates the outcome from side-to-move: a random opening frequently leaves
+  *white* better, so `z` stops being predictable from parity alone and the value
+  head has to read the position. Uniform play from the empty board would not
+  achieve this, because black simply wins from there.
+- **Dirichlet noise at the root**, epsilon = 0.25, alpha ~= 10 / (average legal
+  moves) -- approximately 0.15 for 9x9, 0.05 for 15x15.
+- **Temperature 1.0 for the first N plies**, where N ~= the board dimension, then
+  temperature -> 0 (argmax) for the remainder of the game.
 - **Eight-fold dihedral augmentation** of every training sample.
+- **Colour-paired matches in the arena.** Every pairing plays each sampled
+  opening once from each side. This does not belong in self-play -- there both
+  players are the same network and the encoding is already side-to-move
+  relative, so swapping colours yields either the identical encoded position or
+  an illegal one. In the arena the two players differ, and pairing is what keeps
+  colour bias out of the measured ratings.
 
 ### Efficiency measure
 
@@ -84,9 +91,10 @@ Each training generation logs, so that the failure modes above are observable
 rather than assumed away:
 
 - **Black win rate** — expected high and stable (70-95%).
-- **Value loss versus the constant-predictor baseline** (the variance of `z`).
-  Equality means the value head has learned nothing beyond the prior; this
-  detects the parity shortcut directly.
+- **Value loss versus two baselines**: a constant predictor (the variance of
+  `z`), and a parity predictor that outputs the mean `z` conditioned on
+  side-to-move. Failing to beat the parity baseline is the exact signature of
+  the shortcut, and is the measurement that matters.
 - **Policy entropy** — an early collapse toward zero means exploration died.
 - **Distinct opening count and game-length histogram** — narrowing indicates
   diversity collapse.
@@ -161,8 +169,8 @@ checkpoint. Level 1 is policy-only with high temperature. Levels 2 through 5 use
 MCTS at 25, 100, 400 and 1600 simulations with temperature falling to zero.
 
 **`arena`** — plays color-paired round-robin matches among the five levels plus
-the anchor bot, fits ratings by logistic maximum likelihood with the anchor
-pinned at 1200 ELO, and writes `elo.json`. The TUI displays those measured
+the anchor bot, fits ratings by logistic maximum likelihood (with a weak Gaussian prior so
+undefeated players stay finite) and the anchor pinned at 1200 ELO, and writes `elo.json`. The TUI displays those measured
 numbers.
 
 ## 5. Data flow
@@ -202,8 +210,10 @@ Test-driven throughout. The suite is fast enough to run on every change:
   corrupt statistics; Dirichlet noise appears only at the root; a search with a
   perfect evaluator picks the winning move.
 - **Encoding**: planes round-trip; the side-to-move plane flips correctly.
-- **Self-play**: color pairing produces both colors for each sampled opening;
-  playout-cap randomisation records targets only from full-count moves.
+- **Self-play**: random openings are legal, of the configured length, and
+  diverse across seeds; playout-cap randomisation records targets only from
+  full-count moves; the temperature schedule switches at the configured ply.
+- **Arena**: colour pairing plays each opening once from each side.
 - **Arena**: the rating fit recovers known ratings from synthetic results.
 - **Integration**: a 3x3 board with a three-in-a-row win condition trains to
   near-perfect play within seconds, exercising the entire pipeline — self-play,
