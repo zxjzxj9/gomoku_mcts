@@ -1,7 +1,6 @@
 import numpy as np
 import pytest
 
-from gomoku.board import BLACK, WHITE
 from gomoku.evaluator import Evaluator, UniformEvaluator
 from gomoku.game import GameState
 from gomoku.mcts import MCTS, SearchConfig, run_search, search
@@ -32,11 +31,15 @@ def test_search_blocks_an_immediate_loss():
     search has no guidance at all -- it must visit each root child, then each
     of that child's replies. On a 9x9 board with ~74 legal moves that costs a
     few thousand simulations, so the position is posed on a small board where
-    the refutation is genuinely reachable within the budget."""
-    # Black has three at 6, 7, 8 and completes four at 5 or 9. White to move.
-    s = state_with([6, 0, 7, 1, 8], size=5, win_length=4)
+    the refutation is genuinely reachable within the budget.
+
+    White already holds 5, so black's three at 6, 7, 8 have exactly one
+    winning completion. There is a single correct move and the search must
+    find it -- an open three at both ends would be unblockable, and the test
+    would then only be measuring which loss is slowest."""
+    s = state_with([6, 5, 7, 0, 8], size=5, win_length=4)
     counts = search(s, UniformEvaluator(), simulations=600, config=quiet_config())
-    assert int(np.argmax(counts)) in (5, 9)
+    assert int(np.argmax(counts)) == 9
 
 
 def test_visits_are_zero_on_occupied_cells():
@@ -132,6 +135,11 @@ def test_noise_is_reproducible_for_a_seed():
     for tree in trees:
         run_search([tree], UniformEvaluator(), 30)
     assert np.allclose(trees[0].visit_counts(), trees[1].visit_counts())
+    # A different seed must actually change the search, or this test would
+    # pass just as well against an implementation that ignores noise entirely.
+    other = MCTS(s, SearchConfig(), np.random.default_rng(12))
+    run_search([other], UniformEvaluator(), 30)
+    assert not np.allclose(trees[0].visit_counts(), other.visit_counts())
 
 
 def test_run_search_pools_leaves_from_several_trees():

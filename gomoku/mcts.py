@@ -66,6 +66,11 @@ class MCTS:
 
         Terminal leaves are backed up here and do not appear in the result, so
         the returned array may be shorter than `n_leaves` -- or empty.
+
+        Each `collect` must be followed by exactly one `apply` carrying that
+        call's evaluations. Pending leaves accumulate until `apply` drains
+        them, so two `collect` calls in a row leave the tree holding virtual
+        loss it cannot resolve.
         """
         encoded: list[np.ndarray] = []
         for _ in range(max(0, n_leaves)):
@@ -184,11 +189,24 @@ class MCTS:
         asking for N simulations gets a root with N total visits rather than
         N fresh ones on top of the inherited subtree.
         """
+        # Any descent still pending has virtual loss applied along its path.
+        # Re-rooting without undoing it would leave inflated N and depressed W
+        # in the retained subtree, and would strand `pending` flags that block
+        # descent through those nodes forever.
+        for node, path in self._pending:
+            node.pending = False
+            self._undo_virtual_loss(path)
+        self._pending.clear()
+
         index = int(np.flatnonzero(self.root.moves == move)[0])
         child = self.root.children[index]
         self.root = child if child is not None else Node(self.root.state.play(move))
-        self._pending.clear()
         self.root.pending = False
+        # The new root was expanded during the previous search, when it was an
+        # interior node and therefore got no exploration noise. Apply it now,
+        # or self-play would only ever see noise on the first move of a game.
+        if self.config.add_noise and self.root.expanded:
+            self.root.P = self._with_noise(self.root.P).astype(np.float32)
         self.simulations = int(self.root.N.sum())
 
 
