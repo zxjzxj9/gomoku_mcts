@@ -2724,7 +2724,9 @@ def test_random_opening_stays_near_the_centre():
 
 def test_augment_produces_eight_consistent_variants():
     encoded = np.zeros((N_PLANES, 5, 5), dtype=np.float32)
-    encoded[0, 0, 1] = 1.0
+    # Row 1, column 1 is flat index 1 * 5 + 1 == 6, so the marked stone and
+    # the marked policy cell are the same cell. They must move together.
+    encoded[0, 1, 1] = 1.0
     policy = np.zeros(25, dtype=np.float32)
     policy[6] = 1.0
     variants = augment(Sample(encoded, policy, 0.5), size=5)
