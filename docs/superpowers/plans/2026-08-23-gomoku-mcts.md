@@ -1394,6 +1394,9 @@ from gomoku.players import HeuristicPlayer
 from gomoku.tui.app import run_tui
 run_tui(black=None, white=HeuristicPlayer(np.random.default_rng(0)))
 "`
+
+(Task 15 replaces `run_tui`'s signature; this manual check applies to the
+Task 5 version.)
 Expected: a playable 9x9 board. Arrow keys move, Enter places, the bot replies, `q` quits.
 
 - [ ] **Step 7: Commit**
@@ -2443,6 +2446,28 @@ def test_load_levels_ignores_a_corrupt_elo_file(tmp_path):
     assert all(level.elo is None for level in load_levels(path))
 
 
+def test_a_partly_measured_elo_file_leaves_the_rest_unrated(tmp_path):
+    """The most likely real state: an arena run that covered only some levels."""
+    path = tmp_path / "elo.json"
+    path.write_text(json.dumps({"ratings": {"level1": 900, "level3": 1350}}))
+    assert [level.elo for level in load_levels(path)] == [900, None, 1350, None, None]
+
+
+def test_malformed_rating_values_are_unrated_rather_than_fatal(tmp_path):
+    path = tmp_path / "elo.json"
+    path.write_text(json.dumps({"ratings": {
+        "level1": "strong", "level2": True, "level3": None,
+        "level4": [1500], "level5": 1800}}))
+    assert [level.elo for level in load_levels(path)] == [None, None, None, None, 1800]
+
+
+def test_a_ratings_field_that_is_not_an_object_is_ignored(tmp_path):
+    for payload in ({"ratings": None}, {"ratings": [1, 2, 3]}, {"ratings": 5}):
+        path = tmp_path / "elo.json"
+        path.write_text(json.dumps(payload))
+        assert all(level.elo is None for level in load_levels(path))
+
+
 def test_make_player_builds_a_usable_player_for_every_level():
     s = GameState.new(size=5, win_length=5)
     for level in LEVELS:
@@ -2601,6 +2626,9 @@ def load_levels(elo_path: str | Path | None = DEFAULT_ELO_PATH) -> tuple[Level, 
     except (ValueError, KeyError, OSError) as error:
         log.warning("ignoring unreadable ELO file %s: %s", path, error)
         return LEVELS
+    if not isinstance(ratings, dict):
+        log.warning("ignoring ELO file %s: 'ratings' is not an object", path)
+        return LEVELS
     return tuple(
         dataclasses.replace(level, elo=_as_int(ratings.get(level.key)))
         for level in LEVELS
@@ -2608,7 +2636,20 @@ def load_levels(elo_path: str | Path | None = DEFAULT_ELO_PATH) -> tuple[Level, 
 
 
 def _as_int(value) -> int | None:
-    return None if value is None else int(round(float(value)))
+    """Coerce a stored rating, or report it as unmeasured.
+
+    Anything unparseable becomes None -- "unrated" -- rather than raising.
+    A half-written or hand-edited ELO file must never stop someone playing,
+    and it must never be rendered as a number nobody measured. Booleans are
+    rejected explicitly because `int(True)` would otherwise show as 1 ELO.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        log.warning("ignoring malformed ELO value %r", value)
+        return None
 
 
 def make_player(
@@ -4664,10 +4705,23 @@ def test_play_subcommand_explains_itself_without_a_terminal(monkeypatch, capsys)
     assert "interactive terminal" in capsys.readouterr().out
 
 
-def test_play_subcommand_builds_everything_without_launching(tmp_path):
-    """--no-launch exercises checkpoint and level loading with no UI."""
+def test_play_subcommand_builds_everything_without_launching(tmp_path, capsys):
+    """--no-launch exercises checkpoint and level loading with no UI.
+
+    Asserting only the return code would pass even if `_play` never loaded
+    anything, so check it reported what it found."""
     assert main(["play", "--no-launch", "--checkpoint", str(tmp_path / "none.pt"),
                  "--elo", str(tmp_path / "none.json")]) == 0
+    assert "No checkpoint found" in capsys.readouterr().out
+
+
+def test_play_subcommand_reports_a_loaded_checkpoint(tmp_path, capsys):
+    checkpoint = tmp_path / "checkpoint.pt"
+    config = NetConfig(channels=8, blocks=1)
+    save_checkpoint(checkpoint, PolicyValueNet(config), None, 5, config, {})
+    assert main(["play", "--no-launch", "--checkpoint", str(checkpoint),
+                 "--elo", str(tmp_path / "none.json"), "--device", "cpu"]) == 0
+    assert "generation 5" in capsys.readouterr().out
 ```
 
 - [ ] **Step 3: Run them to verify they fail**
