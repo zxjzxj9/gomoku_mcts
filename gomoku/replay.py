@@ -20,9 +20,23 @@ log = logging.getLogger(__name__)
 
 
 class ReplayBuffer:
-    def __init__(self, capacity: int, directory: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        capacity: int,
+        directory: str | Path | None = None,
+        sample_shape: tuple[int, ...] | None = None,
+    ) -> None:
+        """`sample_shape` is the expected `encoded.shape[1:]`, when known.
+
+        A run directory is reused far more often than it is created, and a
+        shard written by a run on a different board is silently loadable --
+        right up to the batch that tries to stack two shapes together, hours
+        later. Recording the shape the run expects turns that into a skipped
+        shard and a warning at load time.
+        """
         self.capacity = capacity
         self.directory = Path(directory) if directory is not None else None
+        self.sample_shape = tuple(sample_shape) if sample_shape is not None else None
         self._samples: collections.deque[Sample] = collections.deque(maxlen=capacity)
         self.n_added = 0
 
@@ -95,18 +109,61 @@ class ReplayBuffer:
             return 0
         loaded = 0
         for path in sorted(self.directory.glob("shard_*.npz")):
+            # Reconstruction is inside the guarded block on purpose. A shard
+            # half-flushed by a killed run reads back fine but holds arrays of
+            # different lengths, and the IndexError that produces lands during
+            # reconstruction, not during np.load. Section 6 promises a corrupt
+            # shard is skipped rather than fatal, so everything that can fail
+            # on a damaged file has to be covered.
             try:
                 with np.load(path) as data:
                     encoded, policy, value = data["encoded"], data["policy"], data["value"]
-            except (OSError, ValueError, KeyError) as error:
+                samples = self._rebuild(path, encoded, policy, value)
+            except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
                 log.warning("skipping unreadable replay shard %s: %s", path, error)
                 continue
-            self.add(
-                Sample(encoded[i], policy[i], float(value[i]))
-                for i in range(len(value))
-            )
-            loaded += len(value)
+            if samples is None:
+                continue
+            self.add(samples)
+            loaded += len(samples)
         return min(loaded, self.capacity) if loaded else 0
+
+    def _rebuild(self, path, encoded, policy, value) -> list[Sample] | None:
+        """Validate one shard's arrays and rebuild its samples, or None to skip."""
+        n = len(value)
+        if len(encoded) != n or len(policy) != n:
+            log.warning(
+                "skipping truncated replay shard %s: %d encoded, %d policy, "
+                "%d value entries", path, len(encoded), len(policy), n,
+            )
+            return None
+        if n and encoded.ndim < 2:
+            log.warning("skipping replay shard %s: encoded array is not a stack "
+                        "of samples (shape %s)", path, encoded.shape)
+            return None
+        shape = tuple(encoded.shape[1:])
+        if n and self.sample_shape is not None and shape != self.sample_shape:
+            log.warning(
+                "skipping replay shard %s: samples are %s but this run uses %s",
+                path, shape, self.sample_shape,
+            )
+            return None
+        return [Sample(encoded[i], policy[i], float(value[i])) for i in range(n)]
+
+    def clear_shards(self) -> int:
+        """Delete every shard on disk. Returns the number removed.
+
+        A from-scratch run must not inherit another run's samples: shards are
+        named by generation alone, so a reused directory would keep the old
+        run's later generations and mix two populations into one buffer.
+        """
+        if self.directory is None or not self.directory.exists():
+            return 0
+        removed = 0
+        for path in sorted(self.directory.glob("shard_*.npz")):
+            path.unlink()
+            removed += 1
+        return removed
 
     def prune_shards(self, keep_samples: int) -> int:
         """Delete the oldest shards the buffer can no longer hold.

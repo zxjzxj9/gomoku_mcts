@@ -4,3 +4,4 @@ __pycache__/
 runs/
 data/
 *.pt
+*.egg-info/

@@ -141,3 +141,81 @@ def test_value_statistics_report_mean_and_variance():
     stats = buffer.value_statistics()
     assert stats["mean"] == pytest.approx(0.0)
     assert stats["variance"] == pytest.approx(1.0)
+
+
+def write_raw_shard(directory, name, encoded, policy, value):
+    np.savez_compressed(str(directory / name), encoded=encoded, policy=policy,
+                        value=value)
+
+
+def test_load_shards_skips_a_shard_from_a_different_board(tmp_path):
+    """A reused run directory is the common case, not the exotic one.
+
+    Shards are named by generation alone, so a 5x5 run and a 9x9 run in the
+    same directory interleave silently -- and the mismatch only surfaces as a
+    stacking error on whichever batch first draws from both.
+    """
+    writer = ReplayBuffer(capacity=100, directory=tmp_path)
+    writer.add(make_samples(4, size=5))
+    writer.save_shard(generation=0)
+    other = ReplayBuffer(capacity=100, directory=tmp_path)
+    other.add(make_samples(3, size=9))
+    other.save_shard(generation=1)
+
+    reader = ReplayBuffer(capacity=100, directory=tmp_path,
+                          sample_shape=(N_PLANES, 5, 5))
+    assert reader.load_shards() == 4
+    assert all(s.encoded.shape == (N_PLANES, 5, 5) for s in reader._samples)
+    # Without the shape, both shards load and the buffer cannot be batched.
+    blind = ReplayBuffer(capacity=100, directory=tmp_path)
+    assert blind.load_shards() == 7
+    with pytest.raises(ValueError):
+        blind.sample_batch(7, np.random.default_rng(0))
+
+
+def test_load_shards_skips_a_truncated_shard(tmp_path):
+    """A half-flushed write leaves the three arrays at different lengths.
+
+    That shard reads back fine and only fails during reconstruction, which is
+    exactly the case section 6 promises is skipped rather than fatal.
+    """
+    good = make_samples(4, size=5)
+
+    writer = ReplayBuffer(capacity=100, directory=tmp_path)
+    writer.add(good)
+    writer.save_shard(generation=0)
+
+    partial = make_samples(3, size=5)
+    write_raw_shard(
+        tmp_path, "shard_000001",
+        np.stack([s.encoded for s in partial]),
+        np.stack([s.policy for s in partial[:1]]),   # flushed short
+        np.array([s.value for s in partial], dtype=np.float32),
+    )
+    reader = ReplayBuffer(capacity=100, directory=tmp_path)
+    assert reader.load_shards() == 4
+    assert len(reader) == 4
+
+
+def test_load_shards_skips_a_shard_whose_encoded_array_is_not_a_stack(tmp_path):
+    write_raw_shard(tmp_path, "shard_000000", np.zeros(3, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32))
+    reader = ReplayBuffer(capacity=10, directory=tmp_path,
+                          sample_shape=(N_PLANES, 5, 5))
+    assert reader.load_shards() == 0
+
+
+def test_clear_shards_removes_every_shard(tmp_path):
+    writer = ReplayBuffer(capacity=100, directory=tmp_path)
+    for generation in range(3):
+        batch = make_samples(2)
+        writer.add(batch)
+        writer.save_shard(generation, samples=batch)
+    assert writer.clear_shards() == 3
+    assert list(tmp_path.glob("shard_*.npz")) == []
+    assert ReplayBuffer(capacity=100, directory=tmp_path).load_shards() == 0
+
+
+def test_clear_shards_without_a_directory_is_a_no_op():
+    assert ReplayBuffer(capacity=10).clear_shards() == 0
