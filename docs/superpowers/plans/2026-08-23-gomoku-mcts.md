@@ -2663,11 +2663,9 @@ This task implements section 3 of the spec. The three requirements that must not
 
 ```python
 import numpy as np
-import pytest
 
-from gomoku.board import BLACK, WHITE
 from gomoku.evaluator import UniformEvaluator
-from gomoku.game import N_PLANES, GameState
+from gomoku.game import N_PLANES
 from gomoku.selfplay import (
     GameStats,
     Sample,
@@ -2789,14 +2787,27 @@ def test_all_moves_recorded_when_full_fraction_is_one():
     assert len(samples) == 8 * stats.lengths[0] - 8 * len(next(iter(stats.openings)))
 
 
-def test_temperature_schedule_switches_to_argmax_after_the_opening():
-    """With temperature_plies 0 every move is greedy, so two runs of the same
-    seed and evaluator agree exactly."""
-    config = small_config(temperature_plies=0, full_fraction=1.0, games_in_flight=1)
-    first, _ = play_games(UniformEvaluator(), 1, config, np.random.default_rng(9))
-    second, _ = play_games(UniformEvaluator(), 1, config, np.random.default_rng(9))
-    assert len(first) == len(second)
-    assert all(np.allclose(a.policy, b.policy) for a, b in zip(first, second))
+def test_temperature_cutoff_defaults_to_the_board_size():
+    assert SelfPlayConfig(size=9).temperature_cutoff() == 9
+    assert SelfPlayConfig(size=9, temperature_plies=3).temperature_cutoff() == 3
+
+
+def test_the_temperature_schedule_actually_changes_play():
+    """A schedule that turns greedy immediately must produce different games
+    from one that stays hot throughout.
+
+    Running the SAME config twice under one seed asserts nothing -- two
+    identical runs agree whatever the schedule does, including a schedule
+    that ignores `temperature_plies` entirely."""
+    greedy = small_config(temperature_plies=0, full_fraction=1.0, games_in_flight=1)
+    hot = small_config(temperature_plies=99, temperature=2.0, full_fraction=1.0,
+                       games_in_flight=1)
+    greedy_samples, _ = play_games(UniformEvaluator(), 4, greedy,
+                                   np.random.default_rng(9))
+    hot_samples, _ = play_games(UniformEvaluator(), 4, hot,
+                                np.random.default_rng(9))
+    assert [int(np.argmax(s.policy)) for s in greedy_samples] != \
+        [int(np.argmax(s.policy)) for s in hot_samples]
 
 
 def test_play_games_is_reproducible_for_a_seed():
@@ -2988,8 +2999,17 @@ def _run_batch(games, evaluator, config, rng) -> None:
         still_active = []
         for game, full in zip(active, use_full):
             counts = game.tree.visit_counts()
-            if counts.sum() <= 0:      # terminal position, nothing to play
-                continue
+            if counts.sum() <= 0:
+                # Every game in `active` is non-terminal by construction, so a
+                # root with no visits means the search never ran -- almost
+                # always a zero simulation budget. Failing here is deliberate:
+                # dropping the game would score it against an invented winner
+                # and mislabel every record it produced.
+                raise ValueError(
+                    "self-play search produced no visits at a non-terminal "
+                    f"position (ply {game.state.ply}); check that "
+                    "full_simulations and fast_simulations are both >= 1"
+                )
             # The schedule counts plies since the opening, not total plies.
             plies_played = game.state.ply - len(game.opening)
             temperature = (
@@ -2998,6 +3018,11 @@ def _run_batch(games, evaluator, config, rng) -> None:
                 else 0.0
             )
             move = sample_move(counts, temperature, rng)
+            # `run_search` targets a TOTAL root-visit count and `advance`
+            # rebases on the reused subtree, so a cheap move after an
+            # expensive one often runs no new simulations at all and plays on
+            # inherited statistics. That is intended tree reuse, not a bug --
+            # do not "fix" it by making the budget incremental.
             if full:
                 game.records.append(
                     _Record(game.state.encode(), counts / counts.sum(),
@@ -3012,6 +3037,8 @@ def _run_batch(games, evaluator, config, rng) -> None:
 
 def _finish(game: _Game, stats: GameStats, config: SelfPlayConfig) -> list[Sample]:
     winner = game.state.winner
+    if winner is None:
+        raise ValueError("cannot finish a game that is still in progress")
     if winner == 0:
         stats.draws += 1
     elif winner == 1:
