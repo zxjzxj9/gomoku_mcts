@@ -1268,6 +1268,9 @@ class GomokuApp(App):
         self.status = "Your move."
         self.winning_line: list[int] | None = None
         self._thinking = False
+        # Bumped whenever self.state is replaced wholesale, so a bot move
+        # computed against an abandoned game can be discarded on arrival.
+        self._generation = 0
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -1313,6 +1316,7 @@ class GomokuApp(App):
         self.refresh_view()
 
     def action_new_game(self) -> None:
+        self._generation += 1
         self.state = GameState.new(self.board_size, self.win_length)
         self.winning_line = None
         self.status = "New game."
@@ -1346,12 +1350,23 @@ class GomokuApp(App):
         self.run_worker(self.bot_turn, thread=True)
 
     def bot_turn(self) -> None:
-        player = self.players[self.state.to_play]
-        move = player.select_move(self.state)
-        self.call_from_thread(self.finish_bot_turn, move)
+        # Read the state once: a second read would reopen the staleness race
+        # in a narrower window.
+        generation = self._generation
+        state = self.state
+        player = self.players[state.to_play]
+        move = player.select_move(state)
+        self.call_from_thread(self.finish_bot_turn, move, generation)
 
-    def finish_bot_turn(self, move: int) -> None:
+    def finish_bot_turn(self, move: int, generation: int) -> None:
         self._thinking = False
+        if generation != self._generation:
+            # The game was reset while this move was being computed. Discard
+            # it rather than apply a move that was never legal in the current
+            # game, and let the new game's own maybe_bot_move take over so a
+            # bot-vs-bot game does not stall.
+            self.maybe_bot_move()
+            return
         self.apply_move(move)
         self.refresh_view()
         self.maybe_bot_move()
@@ -4569,6 +4584,7 @@ Replace `GomokuApp.__init__` and `compose`, and add the level binding:
         self.status = "Your move."
         self.winning_line: list[int] | None = None
         self._thinking = False
+        self._generation = 0
 
     def _players_for_mode(self) -> dict[int, Player | None]:
         opponent = build_opponent(self.level, self.evaluator, self.rng)
