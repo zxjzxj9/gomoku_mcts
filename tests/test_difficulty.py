@@ -99,6 +99,28 @@ def test_load_levels_ignores_a_corrupt_elo_file(tmp_path):
     assert all(level.elo is None for level in load_levels(path))
 
 
+def test_a_partly_measured_elo_file_leaves_the_rest_unrated(tmp_path):
+    """The most likely real state: an arena run that covered only some levels."""
+    path = tmp_path / "elo.json"
+    path.write_text(json.dumps({"ratings": {"level1": 900, "level3": 1350}}))
+    assert [level.elo for level in load_levels(path)] == [900, None, 1350, None, None]
+
+
+def test_malformed_rating_values_are_unrated_rather_than_fatal(tmp_path):
+    path = tmp_path / "elo.json"
+    path.write_text(json.dumps({"ratings": {
+        "level1": "strong", "level2": True, "level3": None,
+        "level4": [1500], "level5": 1800}}))
+    assert [level.elo for level in load_levels(path)] == [None, None, None, None, 1800]
+
+
+def test_a_ratings_field_that_is_not_an_object_is_ignored(tmp_path):
+    for payload in ({"ratings": None}, {"ratings": [1, 2, 3]}, {"ratings": 5}):
+        path = tmp_path / "elo.json"
+        path.write_text(json.dumps(payload))
+        assert all(level.elo is None for level in load_levels(path))
+
+
 def test_make_player_builds_a_usable_player_for_every_level():
     s = GameState.new(size=5, win_length=5)
     for level in LEVELS:

@@ -63,6 +63,9 @@ def load_levels(elo_path: str | Path | None = DEFAULT_ELO_PATH) -> tuple[Level, 
     except (ValueError, KeyError, OSError) as error:
         log.warning("ignoring unreadable ELO file %s: %s", path, error)
         return LEVELS
+    if not isinstance(ratings, dict):
+        log.warning("ignoring ELO file %s: 'ratings' is not an object", path)
+        return LEVELS
     return tuple(
         dataclasses.replace(level, elo=_as_int(ratings.get(level.key)))
         for level in LEVELS
@@ -70,7 +73,20 @@ def load_levels(elo_path: str | Path | None = DEFAULT_ELO_PATH) -> tuple[Level, 
 
 
 def _as_int(value) -> int | None:
-    return None if value is None else int(round(float(value)))
+    """Coerce a stored rating, or report it as unmeasured.
+
+    Anything unparseable becomes None -- "unrated" -- rather than raising.
+    A half-written or hand-edited ELO file must never stop someone playing,
+    and it must never be rendered as a number nobody measured. Booleans are
+    rejected explicitly because `int(True)` would otherwise show as 1 ELO.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        log.warning("ignoring malformed ELO value %r", value)
+        return None
 
 
 def make_player(
