@@ -84,7 +84,11 @@ def _as_int(value) -> int | None:
         return None
     try:
         return int(round(float(value)))
-    except (TypeError, ValueError):
+    # OverflowError belongs here even though it looks out of place:
+    # json.loads accepts bare Infinity/-Infinity tokens, and
+    # round(float("inf")) raises OverflowError rather than ValueError.
+    # (NaN is already covered: round(float("nan")) raises ValueError.)
+    except (TypeError, ValueError, OverflowError):
         log.warning("ignoring malformed ELO value %r", value)
         return None
 

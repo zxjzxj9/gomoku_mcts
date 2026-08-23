@@ -114,6 +114,15 @@ def test_malformed_rating_values_are_unrated_rather_than_fatal(tmp_path):
     assert [level.elo for level in load_levels(path)] == [None, None, None, None, 1800]
 
 
+def test_non_finite_ratings_are_unrated_rather_than_fatal(tmp_path):
+    """`json.loads` accepts bare Infinity and NaN tokens, and round(inf)
+    raises OverflowError rather than ValueError."""
+    path = tmp_path / "elo.json"
+    path.write_text('{"ratings": {"level1": Infinity, "level2": -Infinity, '
+                    '"level3": NaN, "level4": 1600, "level5": 1800}}')
+    assert [level.elo for level in load_levels(path)] == [None, None, None, 1600, 1800]
+
+
 def test_a_ratings_field_that_is_not_an_object_is_ignored(tmp_path):
     for payload in ({"ratings": None}, {"ratings": [1, 2, 3]}, {"ratings": 5}):
         path = tmp_path / "elo.json"
