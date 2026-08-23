@@ -1259,7 +1259,9 @@ class GomokuApp(App):
     ) -> None:
         super().__init__()
         self.players: dict[int, Player | None] = {BLACK: black, WHITE: white}
-        self.size = size
+        # Textual's App.size is a read-only property, so the board dimension
+        # cannot be stored as self.size.
+        self.board_size = size
         self.win_length = win_length
         self.state = GameState.new(size, win_length)
         self.cursor = (size // 2) * size + size // 2
@@ -1290,10 +1292,10 @@ class GomokuApp(App):
         self.query_one("#status", Static).update(self.status)
 
     def action_move_cursor(self, d_row: int, d_col: int) -> None:
-        row, col = divmod(self.cursor, self.size)
-        row = min(self.size - 1, max(0, row + d_row))
-        col = min(self.size - 1, max(0, col + d_col))
-        self.cursor = row * self.size + col
+        row, col = divmod(self.cursor, self.board_size)
+        row = min(self.board_size - 1, max(0, row + d_row))
+        col = min(self.board_size - 1, max(0, col + d_col))
+        self.cursor = row * self.board_size + col
         self.refresh_view()
 
     def action_place(self) -> None:
@@ -1311,7 +1313,7 @@ class GomokuApp(App):
         self.refresh_view()
 
     def action_new_game(self) -> None:
-        self.state = GameState.new(self.size, self.win_length)
+        self.state = GameState.new(self.board_size, self.win_length)
         self.winning_line = None
         self.status = "New game."
         self.refresh_view()
@@ -4543,7 +4545,9 @@ Replace `GomokuApp.__init__` and `compose`, and add the level binding:
         mode: str = "human-vs-pc",
     ) -> None:
         super().__init__()
-        self.size = size
+        # Textual's App.size is a read-only property, so the board dimension
+        # cannot be stored as self.size.
+        self.board_size = size
         self.win_length = win_length
         self.levels = levels if levels is not None else load_levels()
         self.level = self.levels[level_index - 1]
