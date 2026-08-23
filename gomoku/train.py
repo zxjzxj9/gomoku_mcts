@@ -113,10 +113,9 @@ def train(
                                      max_batch=config.inference_max_batch)
             server.start()
             try:
-                per_worker = max(1, config.games_per_generation // config.workers)
                 samples, stats = run_selfplay_workers(
-                    server, config.workers, per_worker, config.selfplay,
-                    seed=int(rng.integers(0, 2**31)),
+                    server, config.workers, config.games_per_generation,
+                    config.selfplay, seed=int(rng.integers(0, 2**31)),
                 )
             finally:
                 server.stop()

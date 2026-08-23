@@ -34,12 +34,32 @@ def test_client_results_match_the_in_process_evaluator(server):
     assert np.allclose(value, expected_value, atol=1e-4)
 
 
-def test_several_clients_are_served_concurrently(server):
-    instance, _ = server
+def test_each_client_gets_back_its_own_results(server):
+    """Every client sends a DIFFERENT batch.
+
+    Sending identical inputs would let a routing bug that swapped responses
+    between workers pass unnoticed -- the shapes would still be right and the
+    numbers would still be equal."""
+    instance, net = server
     clients = [instance.client() for _ in range(3)]
-    x = np.zeros((2, N_PLANES, 5, 5), dtype=np.float32)
-    results = [client.evaluate(x) for client in clients]
-    assert all(policy.shape == (2, 25) for policy, _ in results)
+    rng = np.random.default_rng(0)
+    batches = [rng.random((2, N_PLANES, 5, 5)).astype(np.float32)
+               for _ in clients]
+    reference = NetEvaluator(net, device="cpu")
+    for client, batch in zip(clients, batches):
+        want_policy, want_value = reference.evaluate(batch)
+        policy, value = client.evaluate(batch)
+        assert np.allclose(policy, want_policy, atol=1e-4)
+        assert np.allclose(value, want_value, atol=1e-4)
+
+
+def test_split_games_distributes_the_remainder():
+    from gomoku.server_evaluator import split_games
+
+    assert split_games(128, 6) == [22, 22, 21, 21, 21, 21]
+    assert sum(split_games(128, 6)) == 128
+    assert split_games(4, 2) == [2, 2]
+    assert split_games(2, 5) == [1, 1, 0, 0, 0]
 
 
 def test_stopping_twice_is_safe(server):
@@ -54,10 +74,21 @@ def test_workers_generate_the_requested_games(server):
                             fast_simulations=2, games_in_flight=2,
                             opening_plies=(2, 2))
     samples, stats = run_selfplay_workers(instance, n_workers=2,
-                                          games_per_worker=2, config=config,
+                                          total_games=4, config=config,
                                           seed=0)
     assert stats.n_games == 4
+    assert samples
     assert all(s.encoded.shape == (N_PLANES, 5, 5) for s in samples[:5])
+
+
+def test_an_uneven_split_still_produces_every_game(server):
+    instance, _ = server
+    config = SelfPlayConfig(size=5, win_length=4, full_simulations=8,
+                            fast_simulations=2, games_in_flight=2,
+                            opening_plies=(2, 2))
+    _, stats = run_selfplay_workers(instance, n_workers=3, total_games=5,
+                                    config=config, seed=0)
+    assert stats.n_games == 5
 
 
 def test_worker_output_matches_single_process_shapes(server):
@@ -66,7 +97,7 @@ def test_worker_output_matches_single_process_shapes(server):
                             fast_simulations=2, full_fraction=1.0,
                             games_in_flight=1, opening_plies=(2, 2))
     samples, stats = run_selfplay_workers(instance, n_workers=1,
-                                          games_per_worker=1, config=config,
+                                          total_games=1, config=config,
                                           seed=1)
     assert stats.n_games == 1
     assert samples and np.isclose(samples[0].policy.sum(), 1.0)

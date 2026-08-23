@@ -27,19 +27,36 @@ log = logging.getLogger(__name__)
 
 _STOP = "stop"
 _REFRESH = "refresh"
+_FAILED = "failed"
+
+# A worker blocked forever on a queue is the failure mode this module has to
+# avoid: it does not fail a test, it hangs a multi-day run at 3am. Every wait
+# on the request path is therefore bounded.
+DEFAULT_REQUEST_TIMEOUT = 300.0
 
 
 class ServerEvaluator(Evaluator):
     """A client handle. Sends states to the server and waits for its results."""
 
-    def __init__(self, request_queue, response_queue, worker_id: int) -> None:
+    def __init__(self, request_queue, response_queue, worker_id: int,
+                 timeout: float = DEFAULT_REQUEST_TIMEOUT) -> None:
         self.request_queue = request_queue
         self.response_queue = response_queue
         self.worker_id = worker_id
+        self.timeout = timeout
 
     def evaluate(self, encoded: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         self.request_queue.put((self.worker_id, np.ascontiguousarray(encoded)))
-        return self.response_queue.get()
+        try:
+            first, second = self.response_queue.get(timeout=self.timeout)
+        except queue.Empty as error:
+            raise RuntimeError(
+                f"inference server did not respond within {self.timeout}s; "
+                "it has probably died"
+            ) from error
+        if isinstance(first, str) and first == _FAILED:
+            raise RuntimeError(f"inference server failed: {second}")
+        return first, second
 
 
 def _serve(net_config, state_dict, device, max_batch, wait_seconds,
@@ -78,11 +95,20 @@ def _serve(net_config, state_dict, device, max_batch, wait_seconds,
             pending.append(item)
             total += item[1].shape[0]
 
-        batch = np.concatenate([states for _, states in pending], axis=0)
-        with torch.inference_mode():
-            logits, values = net(torch.from_numpy(batch).to(torch_device))
-            policies = torch.softmax(logits.float(), dim=1).cpu().numpy()
-            values = values.float().cpu().numpy()
+        # Any failure here -- an OOM, a dtype mismatch, two clients sending
+        # different board sizes -- must be reported back. Dying silently would
+        # leave every worker blocked on a queue that will never be served.
+        try:
+            batch = np.concatenate([states for _, states in pending], axis=0)
+            with torch.inference_mode():
+                logits, values = net(torch.from_numpy(batch).to(torch_device))
+                policies = torch.softmax(logits.float(), dim=1).cpu().numpy()
+                values = values.float().cpu().numpy()
+        except Exception as error:  # noqa: BLE001 - reported, not swallowed
+            log.exception("inference server failed on a batch of %d", len(pending))
+            for worker_id, _ in pending:
+                response_queues[worker_id].put((_FAILED, str(error)))
+            continue
         offset = 0
         for worker_id, states in pending:
             count = states.shape[0]
@@ -137,11 +163,22 @@ class InferenceServer:
     def stop(self) -> None:
         if self._process is None:
             return
+        self._next_client = 0
         self.control_queue.put((_STOP, None))
         self._process.join(timeout=10)
         if self._process.is_alive():
             self._process.terminate()
         self._process = None
+
+
+def split_games(total: int, workers: int) -> list[int]:
+    """Divide `total` games across `workers`, distributing the remainder.
+
+    Integer division alone silently drops games: 128 games over 6 workers
+    would run 126.
+    """
+    base, remainder = divmod(total, workers)
+    return [base + (1 if index < remainder else 0) for index in range(workers)]
 
 
 def _worker(server_args, worker_id, games, config, seed, output_queue) -> None:
@@ -155,19 +192,25 @@ def _worker(server_args, worker_id, games, config, seed, output_queue) -> None:
 def run_selfplay_workers(
     server: InferenceServer,
     n_workers: int,
-    games_per_worker: int,
+    total_games: int,
     config: SelfPlayConfig,
     seed: int,
 ) -> tuple[list, GameStats]:
-    """Generate games in `n_workers` processes, all served by one model."""
+    """Generate `total_games` games across `n_workers` processes, one model.
+
+    The game count is the total, not a per-worker figure, so that an uneven
+    split cannot quietly change how many games a generation produces.
+    """
     output_queue = server.context.Queue()
     processes = []
-    for index in range(n_workers):
+    for index, games in enumerate(split_games(total_games, n_workers)):
+        if games <= 0:
+            continue
         evaluator = server.client()
         process = server.context.Process(
             target=_worker,
             args=((evaluator.request_queue, evaluator.response_queue),
-                  evaluator.worker_id, games_per_worker, config,
+                  evaluator.worker_id, games, config,
                   seed + index, output_queue),
             daemon=True,
         )
@@ -176,8 +219,9 @@ def run_selfplay_workers(
 
     samples: list = []
     combined = GameStats()
-    for _ in processes:
-        worker_samples, worker_stats = output_queue.get()
+    for received in range(len(processes)):
+        worker_samples, worker_stats = _collect_result(output_queue, processes,
+                                                       received)
         samples.extend(worker_samples)
         combined.black_wins += worker_stats.black_wins
         combined.white_wins += worker_stats.white_wins
@@ -186,4 +230,25 @@ def run_selfplay_workers(
         combined.openings |= worker_stats.openings
     for process in processes:
         process.join(timeout=10)
+        if process.is_alive():
+            log.warning("terminating a self-play worker that would not exit")
+            process.terminate()
+            process.join(timeout=5)
     return samples, combined
+
+
+def _collect_result(output_queue, processes, collected: int):
+    """Wait for one worker's result, giving up if a worker died first.
+
+    A worker that has already reported is no longer alive, so a dead worker is
+    one that is neither running nor accounted for by a collected result.
+    """
+    while True:
+        try:
+            return output_queue.get(timeout=5.0)
+        except queue.Empty:
+            alive = sum(process.is_alive() for process in processes)
+            if alive + collected < len(processes):
+                raise RuntimeError(
+                    "a self-play worker exited without reporting results"
+                ) from None
