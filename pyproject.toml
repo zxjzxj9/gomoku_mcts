@@ -20,3 +20,4 @@ include = ["gomoku*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = ["slow: end-to-end training runs (tens of seconds)"]
