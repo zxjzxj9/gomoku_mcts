@@ -1,9 +1,7 @@
 import numpy as np
-import pytest
 
-from gomoku.board import BLACK, WHITE
 from gomoku.evaluator import UniformEvaluator
-from gomoku.game import N_PLANES, GameState
+from gomoku.game import N_PLANES
 from gomoku.selfplay import (
     GameStats,
     Sample,
@@ -125,14 +123,27 @@ def test_all_moves_recorded_when_full_fraction_is_one():
     assert len(samples) == 8 * stats.lengths[0] - 8 * len(next(iter(stats.openings)))
 
 
-def test_temperature_schedule_switches_to_argmax_after_the_opening():
-    """With temperature_plies 0 every move is greedy, so two runs of the same
-    seed and evaluator agree exactly."""
-    config = small_config(temperature_plies=0, full_fraction=1.0, games_in_flight=1)
-    first, _ = play_games(UniformEvaluator(), 1, config, np.random.default_rng(9))
-    second, _ = play_games(UniformEvaluator(), 1, config, np.random.default_rng(9))
-    assert len(first) == len(second)
-    assert all(np.allclose(a.policy, b.policy) for a, b in zip(first, second))
+def test_temperature_cutoff_defaults_to_the_board_size():
+    assert SelfPlayConfig(size=9).temperature_cutoff() == 9
+    assert SelfPlayConfig(size=9, temperature_plies=3).temperature_cutoff() == 3
+
+
+def test_the_temperature_schedule_actually_changes_play():
+    """A schedule that turns greedy immediately must produce different games
+    from one that stays hot throughout.
+
+    Running the SAME config twice under one seed asserts nothing -- two
+    identical runs agree whatever the schedule does, including a schedule
+    that ignores `temperature_plies` entirely."""
+    greedy = small_config(temperature_plies=0, full_fraction=1.0, games_in_flight=1)
+    hot = small_config(temperature_plies=99, temperature=2.0, full_fraction=1.0,
+                       games_in_flight=1)
+    greedy_samples, _ = play_games(UniformEvaluator(), 4, greedy,
+                                   np.random.default_rng(9))
+    hot_samples, _ = play_games(UniformEvaluator(), 4, hot,
+                                np.random.default_rng(9))
+    assert [int(np.argmax(s.policy)) for s in greedy_samples] != \
+        [int(np.argmax(s.policy)) for s in hot_samples]
 
 
 def test_play_games_is_reproducible_for_a_seed():

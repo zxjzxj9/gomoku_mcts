@@ -161,8 +161,17 @@ def _run_batch(games, evaluator, config, rng) -> None:
         still_active = []
         for game, full in zip(active, use_full):
             counts = game.tree.visit_counts()
-            if counts.sum() <= 0:      # terminal position, nothing to play
-                continue
+            if counts.sum() <= 0:
+                # Every game in `active` is non-terminal by construction, so a
+                # root with no visits means the search never ran -- almost
+                # always a zero simulation budget. Failing here is deliberate:
+                # dropping the game would score it against an invented winner
+                # and mislabel every record it produced.
+                raise ValueError(
+                    "self-play search produced no visits at a non-terminal "
+                    f"position (ply {game.state.ply}); check that "
+                    "full_simulations and fast_simulations are both >= 1"
+                )
             # The schedule counts plies since the opening, not total plies.
             plies_played = game.state.ply - len(game.opening)
             temperature = (
@@ -171,6 +180,11 @@ def _run_batch(games, evaluator, config, rng) -> None:
                 else 0.0
             )
             move = sample_move(counts, temperature, rng)
+            # `run_search` targets a TOTAL root-visit count and `advance`
+            # rebases on the reused subtree, so a cheap move after an
+            # expensive one often runs no new simulations at all and plays on
+            # inherited statistics. That is intended tree reuse, not a bug --
+            # do not "fix" it by making the budget incremental.
             if full:
                 game.records.append(
                     _Record(game.state.encode(), counts / counts.sum(),
@@ -185,6 +199,8 @@ def _run_batch(games, evaluator, config, rng) -> None:
 
 def _finish(game: _Game, stats: GameStats, config: SelfPlayConfig) -> list[Sample]:
     winner = game.state.winner
+    if winner is None:
+        raise ValueError("cannot finish a game that is still in progress")
     if winner == 0:
         stats.draws += 1
     elif winner == 1:
