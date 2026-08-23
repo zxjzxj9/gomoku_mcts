@@ -1915,8 +1915,13 @@ def test_terminal_root_produces_no_visits_and_still_terminates():
 def test_backup_flips_perspective_between_plies():
     """Every leaf sits one ply below the root, so it is the opponent to move
     there. An evaluator that calls every position a win for whoever moves in
-    it must therefore drive the root value to -1. This pins the sign flip in
-    `_backup`, which is the single easiest thing to get backwards."""
+    it must therefore drive the root value to exactly -1. This pins the sign
+    flip in `_backup`, which is the single easiest thing to get backwards.
+
+    The budget must stay below the root's branching factor (25 legal moves
+    here), because once the search reaches depth 2 the constant evaluator's
+    value flips a second time and cancels the depth-1 signal. That is correct
+    behaviour, but it would make this test measure nothing."""
 
     class OptimisticEvaluator(Evaluator):
         def evaluate(self, encoded):
@@ -1927,8 +1932,8 @@ def test_backup_flips_perspective_between_plies():
 
     s = GameState.new(size=5, win_length=4)
     tree = MCTS(s, quiet_config())
-    run_search([tree], OptimisticEvaluator(), simulations=50)
-    assert tree.root_value() < -0.9
+    run_search([tree], OptimisticEvaluator(), simulations=20)
+    assert tree.root_value() == pytest.approx(-1.0)
 
 
 def test_statistics_stay_consistent_under_virtual_loss():
