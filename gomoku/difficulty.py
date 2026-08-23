@@ -51,25 +51,58 @@ LEVELS: tuple[Level, ...] = (
 )
 
 
-def load_levels(elo_path: str | Path | None = DEFAULT_ELO_PATH) -> tuple[Level, ...]:
-    """Return the levels, annotated with measured ratings when available."""
+def load_levels(
+    elo_path: str | Path | None = DEFAULT_ELO_PATH,
+    size: int | None = None,
+    win_length: int | None = None,
+) -> tuple[Level, ...]:
+    """Return the levels, annotated with measured ratings when available.
+
+    Pass `size` and `win_length` to demand that the ratings were measured on
+    the board about to be played. A rating is a property of a board as much as
+    of a checkpoint, and showing a 9x9 number above a 15x15 game is the one
+    route by which a *displayed* rating can be false. When the metadata
+    disagrees -- or is missing, so nothing can be checked -- the levels come
+    back unrated rather than wrong.
+    """
     if elo_path is None:
         return LEVELS
     path = Path(elo_path)
     if not path.exists():
         return LEVELS
     try:
-        ratings = json.loads(path.read_text())["ratings"]
-    except (ValueError, KeyError, OSError) as error:
+        payload = json.loads(path.read_text())
+        ratings = payload["ratings"]
+    except (ValueError, KeyError, OSError, TypeError) as error:
         log.warning("ignoring unreadable ELO file %s: %s", path, error)
         return LEVELS
     if not isinstance(ratings, dict):
         log.warning("ignoring ELO file %s: 'ratings' is not an object", path)
         return LEVELS
+    if not _board_matches(path, payload, size, win_length):
+        return LEVELS
     return tuple(
         dataclasses.replace(level, elo=_as_int(ratings.get(level.key)))
         for level in LEVELS
     )
+
+
+def _board_matches(path, payload, size: int | None, win_length: int | None) -> bool:
+    """Does this ELO file describe the board the caller is about to play?"""
+    if size is None and win_length is None:
+        return True
+    metadata = payload.get("metadata") if isinstance(payload, dict) else None
+    if not isinstance(metadata, dict):
+        log.warning("ignoring ratings in %s: it records no board metadata, so "
+                    "they cannot be confirmed to describe a %sx%s board",
+                    path, size, size)
+        return False
+    for name, wanted in (("size", size), ("win_length", win_length)):
+        if wanted is not None and metadata.get(name) != wanted:
+            log.warning("ignoring ratings in %s: measured with %s=%r, playing "
+                        "%s=%r", path, name, metadata.get(name), name, wanted)
+            return False
+    return True
 
 
 def _as_int(value) -> int | None:

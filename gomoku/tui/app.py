@@ -63,7 +63,10 @@ class GomokuApp(App):
         # cannot be stored as self.size.
         self.board_size = size
         self.win_length = win_length
-        self.levels = levels if levels is not None else load_levels()
+        # The default ELO file is only trustworthy for the board it was
+        # measured on, so the fallback asks the same question the CLI does.
+        self.levels = levels if levels is not None else load_levels(
+            size=size, win_length=win_length)
         self.level = self.levels[level_index - 1]
         self.evaluator = evaluator
         self.rng = rng if rng is not None else np.random.default_rng()

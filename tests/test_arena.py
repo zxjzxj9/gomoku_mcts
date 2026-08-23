@@ -6,11 +6,14 @@ import pytest
 from gomoku.arena import (
     MatchConfig,
     fit_ratings,
+    measure_levels,
     play_match,
     play_pair,
     round_robin,
     write_elo,
 )
+from gomoku.difficulty import LEVELS
+from gomoku.evaluator import UniformEvaluator
 from gomoku.game import GameState
 from gomoku.players import HeuristicPlayer, Player, RandomPlayer
 
@@ -128,3 +131,24 @@ def test_write_elo_produces_a_file_difficulty_can_read(tmp_path):
     assert payload["ratings"]["level3"] == 1600.0
     assert payload["metadata"]["games_per_pair"] == 20
     assert [level.elo for level in load_levels(path)] == [1200, 1400, 1600, 1800, 2000]
+
+
+def test_measure_levels_records_the_checkpoint_generation(tmp_path):
+    """Without it, fifty more generations leave the TUI showing last week's
+    ratings as current, with nothing on disk to say otherwise."""
+    path = tmp_path / "elo.json"
+    measure_levels(UniformEvaluator(), MatchConfig(size=5, win_length=4,
+                                                   games_per_pair=2),
+                   np.random.default_rng(0), path, levels=LEVELS[:2],
+                   generation=17)
+    metadata = json.loads(path.read_text())["metadata"]
+    assert metadata["generation"] == 17
+    assert metadata["size"] == 5 and metadata["win_length"] == 4
+
+
+def test_measure_levels_without_a_generation_records_none(tmp_path):
+    path = tmp_path / "elo.json"
+    measure_levels(UniformEvaluator(), MatchConfig(size=5, win_length=4,
+                                                   games_per_pair=2),
+                   np.random.default_rng(0), path, levels=LEVELS[:2])
+    assert json.loads(path.read_text())["metadata"]["generation"] is None

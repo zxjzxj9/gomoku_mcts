@@ -136,3 +136,43 @@ def test_make_player_builds_a_usable_player_for_every_level():
         player = make_player(level, UniformEvaluator(), np.random.default_rng(0))
         assert player.select_move(s) in set(s.legal_moves().tolist())
         assert str(level.index) in player.name
+
+
+def rated_file(path, **metadata):
+    path.write_text(json.dumps({
+        "ratings": {"level1": 900, "level2": 1100, "level3": 1350,
+                    "level4": 1600, "level5": 1850, "heuristic": 1200},
+        "metadata": metadata,
+    }))
+    return path
+
+
+def test_ratings_measured_on_the_same_board_are_used(tmp_path):
+    path = rated_file(tmp_path / "elo.json", size=9, win_length=5,
+                      generation=12)
+    levels = load_levels(path, size=9, win_length=5)
+    assert [level.elo for level in levels] == [900, 1100, 1350, 1600, 1850]
+
+
+def test_ratings_measured_on_another_board_are_not_shown(tmp_path):
+    """A 9x9 rating above a 15x15 game is a displayed number nobody measured."""
+    path = rated_file(tmp_path / "elo.json", size=9, win_length=5)
+    assert all(level.elo is None for level in load_levels(path, size=15,
+                                                          win_length=5))
+    assert all(level.elo is None for level in load_levels(path, size=9,
+                                                          win_length=6))
+
+
+def test_ratings_without_board_metadata_cannot_be_confirmed(tmp_path):
+    path = tmp_path / "elo.json"
+    path.write_text(json.dumps({"ratings": {"level1": 900}}))
+    assert all(level.elo is None for level in load_levels(path, size=9,
+                                                          win_length=5))
+    # A caller that asks no questions still gets the old behaviour.
+    assert load_levels(path)[0].elo == 900
+
+
+def test_asking_about_only_one_dimension_still_checks_it(tmp_path):
+    path = rated_file(tmp_path / "elo.json", size=9, win_length=5)
+    assert load_levels(path, size=9)[0].elo == 900
+    assert load_levels(path, size=13)[0].elo is None

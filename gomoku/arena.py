@@ -153,8 +153,14 @@ def measure_levels(
     rng: np.random.Generator,
     elo_path: str | Path,
     levels: tuple[Level, ...] = LEVELS,
+    generation: int | None = None,
 ) -> dict[str, float]:
-    """Run the ladder against the anchor and fit ratings for every level."""
+    """Run the ladder against the anchor and fit ratings for every level.
+
+    `generation` identifies the checkpoint that was rated. Without it, fifty
+    more generations of training leave the TUI presenting last week's ratings
+    as current, with nothing on disk to say otherwise.
+    """
     players: dict[str, Player] = {
         level.key: make_player(level, evaluator, rng) for level in levels
     }
@@ -166,6 +172,7 @@ def measure_levels(
         ratings,
         {
             "games_per_pair": config.games_per_pair,
+            "generation": generation,
             "size": config.size,
             "win_length": config.win_length,
             "anchor": ANCHOR_NAME,
