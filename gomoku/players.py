@@ -13,7 +13,9 @@ import abc
 import numpy as np
 
 from gomoku.board import DIRECTIONS, EMPTY, Board, other
+from gomoku.evaluator import Evaluator
 from gomoku.game import GameState
+from gomoku.mcts import MCTS, SearchConfig, run_search
 
 
 class Player(abc.ABC):
@@ -142,3 +144,66 @@ class HeuristicPlayer(Player):
         )
         best = np.flatnonzero(scores == scores.max())
         return int(moves[self.rng.choice(best)])
+
+
+def sample_move(counts: np.ndarray, temperature: float, rng: np.random.Generator) -> int:
+    """Choose a move from visit counts.
+
+    Temperature 0 is a deterministic argmax; higher temperatures flatten the
+    distribution. Cells with no visits are never chosen, so an illegal move
+    cannot be produced.
+    """
+    if not np.any(counts > 0):
+        raise ValueError("no visited moves to sample from")
+    if temperature <= 0.0:
+        return int(np.argmax(counts))
+    weights = np.power(counts.astype(np.float64), 1.0 / temperature)
+    total = weights.sum()
+    if not np.isfinite(total) or total <= 0:
+        return int(np.argmax(counts))
+    return int(rng.choice(len(weights), p=weights / total))
+
+
+class MCTSPlayer(Player):
+    """Plays by PUCT search, or by the raw policy when `policy_only` is set.
+
+    Difficulty is entirely a matter of `simulations` and `temperature`; one
+    checkpoint drives every level.
+    """
+
+    def __init__(
+        self,
+        evaluator: Evaluator,
+        simulations: int,
+        temperature: float = 0.0,
+        policy_only: bool = False,
+        config: SearchConfig | None = None,
+        rng: np.random.Generator | None = None,
+        name: str = "mcts",
+        leaf_batch: int = 8,
+    ) -> None:
+        self.evaluator = evaluator
+        self.simulations = simulations
+        self.temperature = temperature
+        self.policy_only = policy_only
+        # Search noise belongs to training, not to play.
+        self.config = config or SearchConfig(add_noise=False)
+        self.rng = rng if rng is not None else np.random.default_rng()
+        self.name = name
+        self.leaf_batch = leaf_batch
+
+    def select_move(self, state: GameState) -> int:
+        if self.policy_only or self.simulations <= 0:
+            return self._policy_move(state)
+        tree = MCTS(state, self.config, self.rng)
+        run_search([tree], self.evaluator, self.simulations, self.leaf_batch)
+        return sample_move(tree.visit_counts(), self.temperature, self.rng)
+
+    def _policy_move(self, state: GameState) -> int:
+        priors, _ = self.evaluator.evaluate(state.encode()[None])
+        masked = np.zeros_like(priors[0])
+        legal = state.legal_moves()
+        masked[legal] = priors[0][legal]
+        if masked.sum() <= 0:
+            masked[legal] = 1.0
+        return sample_move(masked, max(self.temperature, 1e-3), self.rng)
