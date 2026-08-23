@@ -139,7 +139,11 @@ class MCTS:
             if not node.expanded:
                 legal_prior = prior[node.moves]
                 total = legal_prior.sum()
-                if total <= 0:
+                # A diverged network emits NaN priors, and NaN fails every
+                # comparison -- including `total <= 0` -- so without the
+                # finiteness test the NaNs are normalised into P and poison
+                # every later selection in this tree.
+                if not np.isfinite(total) or total <= 0:
                     legal_prior = np.full_like(legal_prior, 1.0 / max(len(node.moves), 1))
                 else:
                     legal_prior = legal_prior / total

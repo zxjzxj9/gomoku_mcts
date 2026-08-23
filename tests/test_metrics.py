@@ -63,3 +63,32 @@ def test_metrics_writer_skips_a_truncated_line(tmp_path):
     with path.open("a") as handle:
         handle.write('{"generation": 1, "loss"\n')
     assert len(MetricsWriter(path).read_all()) == 1
+
+
+def test_baselines_with_unequal_groups_including_a_group_of_one():
+    """The degenerate case seen in a real run.
+
+    A group of one is fitted perfectly by its own mean, which drags the
+    parity baseline toward zero and makes "beat the parity baseline"
+    unpassable however good the value head is. The number is correct; it is
+    the group sizes that reveal it is meaningless, which is why they are
+    logged alongside it.
+    """
+    values = np.array([1.0, -1.0, 1.0, 1.0, 0.0])
+    is_black = np.array([True, True, True, True, False])
+    losses = baseline_value_losses(values, is_black)
+    # Black group mean is 0.5 -> errors 0.5, 1.5, 0.5, 0.5; white fits exactly.
+    assert losses["parity"] == pytest.approx((0.25 + 2.25 + 0.25 + 0.25) / 5)
+    assert losses["parity"] < losses["constant"]
+
+
+def test_a_single_sample_per_group_makes_the_parity_baseline_vacuous():
+    values = np.array([1.0, -1.0])
+    losses = baseline_value_losses(values, np.array([True, False]))
+    assert losses["parity"] == pytest.approx(0.0)
+    assert losses["constant"] == pytest.approx(1.0)
+
+
+def test_baselines_handle_a_single_sample_overall():
+    losses = baseline_value_losses(np.array([1.0]), np.array([True]))
+    assert losses == {"constant": pytest.approx(0.0), "parity": pytest.approx(0.0)}

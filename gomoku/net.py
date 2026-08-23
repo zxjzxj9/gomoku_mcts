@@ -18,6 +18,8 @@ from gomoku.game import N_PLANES
 
 log = logging.getLogger(__name__)
 
+CHECKPOINT_VERSION = 1
+
 
 def select_device(prefer: str | None = None) -> torch.device:
     """Pick a compute device. MPS when available, otherwise CPU.
@@ -105,6 +107,10 @@ def save_checkpoint(
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
+        # Schema version, so a future format change can migrate rather than
+        # guess. `load_checkpoint` tolerates its absence: every checkpoint
+        # written before this field existed is version 1 by definition.
+        "version": CHECKPOINT_VERSION,
         "model": net.state_dict(),
         "optimizer": optimizer.state_dict() if optimizer is not None else None,
         "generation": generation,

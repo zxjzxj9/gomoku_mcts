@@ -1,7 +1,14 @@
 import torch
 
 from gomoku.game import N_PLANES
-from gomoku.net import NetConfig, PolicyValueNet, load_checkpoint, save_checkpoint, select_device
+from gomoku.net import (
+    CHECKPOINT_VERSION,
+    NetConfig,
+    PolicyValueNet,
+    load_checkpoint,
+    save_checkpoint,
+    select_device,
+)
 
 
 def small():
@@ -76,3 +83,47 @@ def test_checkpoint_write_is_atomic(tmp_path):
     save_checkpoint(path, net, optimizer, 0, NetConfig(channels=8, blocks=1), {})
     assert path.exists()
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_gradients_reach_the_policy_head_and_the_value_head_separately():
+    """A dead value head is the failure this project exists to detect.
+
+    Asserting that *some* parameter has a gradient passes with a value head
+    that is entirely disconnected, so check each head by name.
+    """
+    net = small()
+    logits, value = net(torch.randn(2, N_PLANES, 9, 9))
+    (logits.sum() + value.sum()).backward()
+
+    def total_gradient(prefix):
+        grads = [p.grad for name, p in net.named_parameters()
+                 if name.startswith(prefix)]
+        assert grads, f"no parameters under {prefix}"
+        assert all(g is not None for g in grads), f"a {prefix} parameter got no grad"
+        return sum(float(g.abs().sum()) for g in grads)
+
+    assert total_gradient("policy_head") > 0.0
+    assert total_gradient("value_head") > 0.0
+
+
+def test_checkpoints_record_a_schema_version(tmp_path):
+    path = tmp_path / "ckpt.pt"
+    config = NetConfig(channels=8, blocks=1)
+    save_checkpoint(path, small(), None, generation=1, config=config)
+    assert load_checkpoint(path, map_location="cpu")["version"] == CHECKPOINT_VERSION
+
+
+def test_loading_a_checkpoint_written_before_versioning_still_works(tmp_path):
+    """Every checkpoint from the runs already on disk lacks the field."""
+    path = tmp_path / "old.pt"
+    config = NetConfig(channels=8, blocks=1)
+    save_checkpoint(path, small(), None, generation=3, config=config)
+    payload = load_checkpoint(path, map_location="cpu")
+    del payload["version"]
+    torch.save(payload, path)
+
+    reloaded = load_checkpoint(path, map_location="cpu")
+    assert reloaded.get("version") is None
+    net = PolicyValueNet(NetConfig(**reloaded["config"]))
+    net.load_state_dict(reloaded["model"])
+    assert reloaded["generation"] == 3

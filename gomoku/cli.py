@@ -60,6 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
     selfplay.add_argument("--games", type=int, default=8)
     selfplay.add_argument("--simulations", type=int, default=600)
     selfplay.add_argument("--fast-simulations", type=int, default=100)
+    # Present on `train` too: without them `selfplay` generates a different
+    # distribution from the one training consumes, which is the one thing the
+    # subcommand exists to let you inspect.
+    selfplay.add_argument("--full-fraction", type=float, default=0.25)
+    selfplay.add_argument("--games-in-flight", type=int, default=32)
 
     arena = subparsers.add_parser("arena", help="measure level ratings")
     board_arguments(arena)
@@ -93,7 +98,7 @@ def _play(args, rng) -> int:
         print("No checkpoint found; playing against the heuristic bot.")
     else:
         print(f"Loaded checkpoint trained to generation {generation}.")
-    levels = load_levels(args.elo)
+    levels = load_levels(args.elo, size=args.size, win_length=args.win_length)
     if args.no_launch or not sys.stdout.isatty():
         if args.no_launch:
             return 0
@@ -110,8 +115,8 @@ def _selfplay_config(args) -> SelfPlayConfig:
         win_length=args.win_length,
         full_simulations=args.simulations,
         fast_simulations=args.fast_simulations,
-        full_fraction=getattr(args, "full_fraction", 0.25),
-        games_in_flight=getattr(args, "games_in_flight", 32),
+        full_fraction=args.full_fraction,
+        games_in_flight=args.games_in_flight,
         search=SearchConfig(dirichlet_alpha=10.0 / (args.size * args.size)),
     )
 
@@ -141,18 +146,20 @@ def _selfplay(args, rng) -> int:
     print(f"{stats.n_games} games, {len(samples)} samples")
     print(f"black win rate {stats.black_win_rate:.2f}, "
           f"mean length {stats.mean_length:.1f}, "
-          f"distinct openings {len(stats.openings)}")
+          f"distinct openings {len(stats.openings)}, "
+          f"distinct play prefixes {len(stats.play_prefixes)}")
     return 0
 
 
 def _arena(args, rng) -> int:
-    evaluator, _ = load_evaluator(args.checkpoint, args.device)
+    evaluator, generation = load_evaluator(args.checkpoint, args.device)
     if evaluator is None:
         print("No checkpoint found; nothing to rate.")
         return 1
     config = MatchConfig(size=args.size, win_length=args.win_length,
                          games_per_pair=args.games_per_pair)
-    ratings = measure_levels(evaluator, config, rng, args.out)
+    ratings = measure_levels(evaluator, config, rng, args.out,
+                             generation=generation)
     for name, rating in sorted(ratings.items(), key=lambda item: item[1]):
         print(f"{name:>12}  {rating:7.0f}")
     print(f"written to {args.out}")

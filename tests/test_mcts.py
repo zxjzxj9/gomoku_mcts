@@ -186,3 +186,39 @@ def test_advance_rebases_the_simulation_counter_on_reused_visits():
     # The budget counts inherited visits, so the root totals 60 rather than
     # 60 on top of whatever was reused.
     assert tree.root.N.sum() == pytest.approx(max(60, reused), abs=1)
+
+
+def test_nan_priors_do_not_poison_the_tree():
+    """A diverged network emits NaNs, and NaN passes `total <= 0`.
+
+    Without the finiteness test the NaNs are normalised straight into P, and
+    every selection afterwards -- in this search and in every search reusing
+    the subtree -- picks argmax over NaN.
+    """
+    class DivergedEvaluator(Evaluator):
+        def evaluate(self, encoded):
+            n = encoded.shape[0]
+            cells = encoded.shape[-1] * encoded.shape[-2]
+            return (np.full((n, cells), np.nan, np.float32),
+                    np.zeros(n, np.float32))
+
+    s = GameState.new(size=5, win_length=4)
+    tree = MCTS(s, quiet_config())
+    run_search([tree], DivergedEvaluator(), simulations=40)
+    counts = tree.visit_counts()
+    assert np.all(np.isfinite(tree.root.P))
+    assert counts.sum() > 0
+    # A uniform fallback spreads the visits; NaN priors pile them on one edge.
+    assert int((counts > 0).sum()) > 1
+
+
+def test_priors_that_sum_to_zero_still_fall_back_to_uniform():
+    class ZeroEvaluator(Evaluator):
+        def evaluate(self, encoded):
+            n = encoded.shape[0]
+            cells = encoded.shape[-1] * encoded.shape[-2]
+            return (np.zeros((n, cells), np.float32), np.zeros(n, np.float32))
+
+    tree = MCTS(GameState.new(size=5, win_length=4), quiet_config())
+    run_search([tree], ZeroEvaluator(), simulations=10)
+    assert np.allclose(tree.root.P.sum(), 1.0)
