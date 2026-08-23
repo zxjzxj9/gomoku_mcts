@@ -73,6 +73,27 @@ async def test_bot_replies_after_a_human_move():
         assert app.state.to_play == BLACK
 
 
+class _RaisingPlayer(HeuristicPlayer):
+    """A player whose `select_move` always raises, to test that a bot
+    exception does not wedge the UI forever."""
+
+    def select_move(self, state):
+        raise RuntimeError("boom")
+
+
+@pytest.mark.asyncio
+async def test_a_raising_bot_does_not_wedge_the_ui():
+    rng = np.random.default_rng(0)
+    app = GomokuApp(black=None, white=_RaisingPlayer(rng), size=5, win_length=5)
+    async with app.run_test() as pilot:
+        await pilot.press("enter")
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert app._thinking is False
+        assert "fail" in app.status.lower() or "error" in app.status.lower()
+
+
 @pytest.mark.asyncio
 async def test_new_game_discards_a_stale_in_flight_bot_move():
     # Rather than trying to reliably win a race against a real worker thread,

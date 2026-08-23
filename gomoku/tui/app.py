@@ -6,15 +6,22 @@ responsive.
 
 from __future__ import annotations
 
+import numpy as np
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import Footer, Header, Static
 
 from gomoku.board import BLACK, WHITE
+from gomoku.difficulty import LEVELS, Level, load_levels
+from gomoku.engine import build_opponent
+from gomoku.evaluator import Evaluator
 from gomoku.game import GameState
 from gomoku.players import Player
 from gomoku.tui.render import board_text
+
+# Distinguishes "caller passed None, meaning a human" from "caller said nothing".
+_UNSET = object()
 
 
 class GomokuApp(App):
@@ -31,20 +38,46 @@ class GomokuApp(App):
         Binding("right", "move_cursor(0, 1)", "Right"),
         Binding("enter,space", "place", "Place"),
         Binding("n", "new_game", "New game"),
+        Binding("1", "set_level(1)", "L1"),
+        Binding("2", "set_level(2)", "L2"),
+        Binding("3", "set_level(3)", "L3"),
+        Binding("4", "set_level(4)", "L4"),
+        Binding("5", "set_level(5)", "L5"),
         Binding("q", "quit", "Quit"),
     ]
 
     def __init__(
         self,
-        black: Player | None = None,
-        white: Player | None = None,
+        black: Player | None = _UNSET,
+        white: Player | None = _UNSET,
         size: int = 9,
         win_length: int = 5,
+        levels: tuple[Level, ...] | None = None,
+        level_index: int = 3,
+        evaluator: Evaluator | None = None,
+        rng: np.random.Generator | None = None,
+        mode: str = "human-vs-pc",
     ) -> None:
         super().__init__()
-        self.players: dict[int, Player | None] = {BLACK: black, WHITE: white}
+        # Textual's App.size is a read-only property, so the board dimension
+        # cannot be stored as self.size.
         self.board_size = size
         self.win_length = win_length
+        self.levels = levels if levels is not None else load_levels()
+        self.level = self.levels[level_index - 1]
+        self.evaluator = evaluator
+        self.rng = rng if rng is not None else np.random.default_rng()
+        self.mode = mode
+        # An explicitly supplied player wins over the mode, and passing None
+        # explicitly means "a human plays this colour".
+        self.explicit_players = black is not _UNSET or white is not _UNSET
+        if self.explicit_players:
+            self.players: dict[int, Player | None] = {
+                BLACK: None if black is _UNSET else black,
+                WHITE: None if white is _UNSET else white,
+            }
+        else:
+            self.players = self._players_for_mode()
         self.state = GameState.new(size, win_length)
         self.cursor = (size // 2) * size + size // 2
         self.status = "Your move."
@@ -52,9 +85,19 @@ class GomokuApp(App):
         self._thinking = False
         self._generation = 0
 
+    def _players_for_mode(self) -> dict[int, Player | None]:
+        opponent = build_opponent(self.level, self.evaluator, self.rng)
+        if self.mode == "pc-vs-pc":
+            return {
+                BLACK: opponent,
+                WHITE: build_opponent(self.level, self.evaluator, self.rng),
+            }
+        return {BLACK: None, WHITE: opponent}
+
     def compose(self) -> ComposeResult:
         yield Header()
         with Vertical():
+            yield Static(id="level")
             yield Static(id="board")
             yield Static(id="status")
         yield Footer()
@@ -64,6 +107,9 @@ class GomokuApp(App):
         self.maybe_bot_move()
 
     def refresh_view(self) -> None:
+        self.query_one("#level", Static).update(
+            f"Level {self.level.label()}   [1-5 to change]"
+        )
         show_cursor = self.players[self.state.to_play] is None
         self.query_one("#board", Static).update(
             board_text(
@@ -103,6 +149,14 @@ class GomokuApp(App):
         self.refresh_view()
         self.maybe_bot_move()
 
+    def action_set_level(self, index: int) -> None:
+        """Switch difficulty. Changing opponent mid-game would be unfair, so
+        this starts a fresh game."""
+        self.level = self.levels[index - 1]
+        if not self.explicit_players:
+            self.players = self._players_for_mode()
+        self.action_new_game()
+
     def apply_move(self, move: int) -> None:
         mover = self.state.to_play
         self.state = self.state.play(move)
@@ -133,8 +187,23 @@ class GomokuApp(App):
         generation = self._generation
         state = self.state
         player = self.players[state.to_play]
-        move = player.select_move(state)
+        try:
+            move = player.select_move(state)
+        except Exception as error:
+            # If select_move raises, call_from_thread below would never run
+            # and _thinking would stay True forever, permanently freezing the
+            # engine. Clear it and surface the failure instead.
+            self.call_from_thread(self.fail_bot_turn, str(error), generation)
+            return
         self.call_from_thread(self.finish_bot_turn, move, generation)
+
+    def fail_bot_turn(self, message: str, generation: int) -> None:
+        self._thinking = False
+        if generation != self._generation:
+            self.maybe_bot_move()
+            return
+        self.status = f"Engine failure: {message}"
+        self.refresh_view()
 
     def finish_bot_turn(self, move: int, generation: int) -> None:
         self._thinking = False
@@ -151,9 +220,15 @@ class GomokuApp(App):
 
 
 def run_tui(
-    black: Player | None = None,
-    white: Player | None = None,
     size: int = 9,
     win_length: int = 5,
+    levels: tuple[Level, ...] | None = None,
+    level_index: int = 3,
+    evaluator: Evaluator | None = None,
+    rng: np.random.Generator | None = None,
+    mode: str = "human-vs-pc",
 ) -> None:
-    GomokuApp(black, white, size, win_length).run()
+    GomokuApp(
+        size=size, win_length=win_length, levels=levels, level_index=level_index,
+        evaluator=evaluator, rng=rng, mode=mode,
+    ).run()
