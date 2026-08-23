@@ -71,3 +71,30 @@ async def test_bot_replies_after_a_human_move():
         await pilot.pause()
         assert app.state.ply == 2
         assert app.state.to_play == BLACK
+
+
+@pytest.mark.asyncio
+async def test_new_game_discards_a_stale_in_flight_bot_move():
+    # Rather than trying to reliably win a race against a real worker thread,
+    # simulate the race directly: capture the generation a "bot" was thinking
+    # in, reset the game (which bumps the generation), then deliver that
+    # stale move the way `bot_turn` would via `call_from_thread`. The move
+    # must be discarded, not applied to the fresh board.
+    rng = np.random.default_rng(0)
+    app = GomokuApp(black=None, white=HeuristicPlayer(rng), size=5, win_length=5)
+    async with app.run_test() as pilot:
+        await pilot.press("enter")  # human move; bot worker starts thinking
+        await pilot.pause()
+
+        stale_generation = app._generation
+        stale_move = 24  # last cell; would be legal on the fresh board too
+
+        app.action_new_game()
+        assert app.state.ply == 0
+        assert app._generation != stale_generation
+
+        app.finish_bot_turn(stale_move, stale_generation)
+        await pilot.pause()
+
+        assert app.state.ply == 0
+        assert app.state.board.grid.reshape(-1)[stale_move] == 0
