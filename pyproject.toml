@@ -12,10 +12,11 @@ dependencies = ["numpy>=1.26", "torch>=2.9", "textual>=0.80"]
 gomoku = "gomoku.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 
 [tool.setuptools.packages.find]
 include = ["gomoku*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
