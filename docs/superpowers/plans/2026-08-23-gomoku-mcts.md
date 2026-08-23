@@ -4560,7 +4560,7 @@ def app_with_levels(tmp_path, **kwargs):
 async def test_header_shows_the_level_name_and_elo(tmp_path):
     app = app_with_levels(tmp_path, level_index=3)
     async with app.run_test():
-        text = str(app.query_one("#level").renderable)
+        text = str(app.query_one("#level").content)
         assert "Club" in text and "1300" in text
 
 
@@ -4569,14 +4569,14 @@ async def test_number_keys_switch_level(tmp_path):
     async with app.run_test() as pilot:
         await pilot.press("5")
         assert app.level.index == 5
-        assert "Expert" in str(app.query_one("#level").renderable)
+        assert "Expert" in str(app.query_one("#level").content)
 
 
 async def test_unrated_levels_are_labelled_rather_than_invented():
     app = GomokuApp(size=5, win_length=5, levels=load_levels(None),
                     rng=np.random.default_rng(0))
     async with app.run_test():
-        assert "unrated" in str(app.query_one("#level").renderable)
+        assert "unrated" in str(app.query_one("#level").content)
 
 
 async def test_pc_vs_pc_mode_plays_itself_without_human_input(tmp_path):
