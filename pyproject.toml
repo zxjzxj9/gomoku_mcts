@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gomoku"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["numpy>=1.26", "torch>=2.9", "textual>=0.80"]
+
+[project.scripts]
+gomoku = "gomoku.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["gomoku*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
