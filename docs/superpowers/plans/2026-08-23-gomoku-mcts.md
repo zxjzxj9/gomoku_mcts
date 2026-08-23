@@ -1872,10 +1872,15 @@ def test_search_finds_an_immediate_win():
 
 
 def test_search_blocks_an_immediate_loss():
-    # White to move; black wins at 34 or 29 next. Any other move loses at once.
-    s = state_with([30, 0, 31, 1, 32, 2, 33])
-    counts = search(s, UniformEvaluator(), simulations=400, config=quiet_config())
-    assert int(np.argmax(counts)) in (29, 34)
+    """Finding the block needs depth-2 lookahead, and with uniform priors the
+    search has no guidance at all -- it must visit each root child, then each
+    of that child's replies. On a 9x9 board with ~74 legal moves that costs a
+    few thousand simulations, so the position is posed on a small board where
+    the refutation is genuinely reachable within the budget."""
+    # Black has three at 6, 7, 8 and completes four at 5 or 9. White to move.
+    s = state_with([6, 0, 7, 1, 8], size=5, win_length=4)
+    counts = search(s, UniformEvaluator(), simulations=600, config=quiet_config())
+    assert int(np.argmax(counts)) in (5, 9)
 
 
 def test_visits_are_zero_on_occupied_cells():
@@ -1907,20 +1912,23 @@ def test_terminal_root_produces_no_visits_and_still_terminates():
     assert tree.simulations == 10
 
 
-def test_root_value_is_negative_when_the_side_to_move_is_lost():
-    # White to move, black has an unstoppable double threat -- with a perfect
-    # evaluator the root value must be clearly negative for white.
-    class LossyEvaluator(Evaluator):
+def test_backup_flips_perspective_between_plies():
+    """Every leaf sits one ply below the root, so it is the opponent to move
+    there. An evaluator that calls every position a win for whoever moves in
+    it must therefore drive the root value to -1. This pins the sign flip in
+    `_backup`, which is the single easiest thing to get backwards."""
+
+    class OptimisticEvaluator(Evaluator):
         def evaluate(self, encoded):
             n = encoded.shape[0]
             cells = encoded.shape[-1] * encoded.shape[-2]
             return (np.full((n, cells), 1.0 / cells, np.float32),
-                    np.full(n, -1.0, np.float32))
+                    np.full(n, 1.0, np.float32))
 
-    s = state_with([30, 0, 31, 1, 32])
+    s = GameState.new(size=5, win_length=4)
     tree = MCTS(s, quiet_config())
-    run_search([tree], LossyEvaluator(), simulations=50)
-    assert tree.root_value() < 0
+    run_search([tree], OptimisticEvaluator(), simulations=50)
+    assert tree.root_value() < -0.9
 
 
 def test_statistics_stay_consistent_under_virtual_loss():
@@ -2226,27 +2234,35 @@ def run_search(
     All trees must share a board size, since their leaves are concatenated.
     """
     trees = list(trees)
-    while True:
+    while any(tree.simulations < simulations for tree in trees):
         batches: list[np.ndarray] = []
         owners: list[tuple[MCTS, int]] = []
+        progressed = False
         for tree in trees:
             remaining = simulations - tree.simulations
             if remaining <= 0:
                 continue
+            before = tree.simulations
             encoded = tree.collect(min(leaf_batch, remaining))
+            # A round can legitimately hand back no leaves and still make
+            # progress: terminal leaves are backed up inside `collect`.
+            if tree.simulations != before:
+                progressed = True
             if encoded.shape[0]:
                 batches.append(encoded)
                 owners.append((tree, encoded.shape[0]))
-        if not owners:
-            if all(tree.simulations >= simulations for tree in trees):
-                return
-            # Every remaining tree is fully terminal; nothing more to search.
+        if owners:
+            priors, values = evaluator.evaluate(np.concatenate(batches, axis=0))
+            offset = 0
+            for tree, count in owners:
+                tree.apply(priors[offset : offset + count],
+                           values[offset : offset + count])
+                offset += count
+            progressed = True
+        if not progressed:
+            # Nothing advanced anywhere this round; the remaining trees cannot
+            # reach their budget. Stop rather than spin.
             return
-        priors, values = evaluator.evaluate(np.concatenate(batches, axis=0))
-        offset = 0
-        for tree, count in owners:
-            tree.apply(priors[offset : offset + count], values[offset : offset + count])
-            offset += count
 
 
 def search(
