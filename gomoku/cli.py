@@ -52,6 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
     trainer.add_argument("--full-fraction", type=float, default=0.25)
     trainer.add_argument("--games-in-flight", type=int, default=32)
     trainer.add_argument("--no-resume", action="store_true")
+    trainer.add_argument("--workers", type=int, default=0)
 
     selfplay = subparsers.add_parser("selfplay", help="generate games only")
     board_arguments(selfplay)
@@ -125,6 +126,7 @@ def _train(args, rng) -> int:
         device=args.device,
         net=NetConfig(channels=args.channels, blocks=args.blocks),
         selfplay=_selfplay_config(args),
+        workers=args.workers,
     )
     path = train(config, rng, resume=not args.no_resume)
     print(f"checkpoint: {path}")

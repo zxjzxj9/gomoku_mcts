@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import torch
 
 from gomoku.mcts import SearchConfig
@@ -99,3 +100,10 @@ def test_train_from_scratch_ignores_an_existing_checkpoint(tmp_path):
 def test_replay_shards_are_written(tmp_path):
     train(tiny_config(tmp_path), np.random.default_rng(0))
     assert list((tmp_path / "replay").glob("shard_*.npz"))
+
+
+@pytest.mark.slow
+def test_train_with_workers_produces_the_same_artefacts(tmp_path):
+    path = train(tiny_config(tmp_path, workers=2), np.random.default_rng(0))
+    assert load_checkpoint(path)["generation"] == 2
+    assert MetricsWriter(tmp_path / "metrics.jsonl").read_all()

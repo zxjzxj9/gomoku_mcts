@@ -38,6 +38,8 @@ class TrainConfig:
     device: str | None = None
     net: NetConfig = dataclasses.field(default_factory=NetConfig)
     selfplay: SelfPlayConfig = dataclasses.field(default_factory=SelfPlayConfig)
+    workers: int = 0          # 0 keeps self-play in this process
+    inference_max_batch: int = 256
 
     @property
     def directory(self) -> Path:
@@ -103,9 +105,25 @@ def train(
         started = time.monotonic()
         net.eval()
         evaluator.refresh(net)
-        samples, stats = play_games(
-            evaluator, config.games_per_generation, config.selfplay, rng
-        )
+        if config.workers > 0:
+            from gomoku.server_evaluator import InferenceServer, run_selfplay_workers
+
+            server = InferenceServer(config.net, net.state_dict(),
+                                     device=config.device,
+                                     max_batch=config.inference_max_batch)
+            server.start()
+            try:
+                per_worker = max(1, config.games_per_generation // config.workers)
+                samples, stats = run_selfplay_workers(
+                    server, config.workers, per_worker, config.selfplay,
+                    seed=int(rng.integers(0, 2**31)),
+                )
+            finally:
+                server.stop()
+        else:
+            samples, stats = play_games(
+                evaluator, config.games_per_generation, config.selfplay, rng
+            )
         buffer.add(samples)
 
         net.train()
