@@ -17,12 +17,23 @@ import torch
 from torch import Tensor
 
 from gomoku.evaluator import NetEvaluator
+from gomoku.game import N_PLANES
 from gomoku.metrics import MetricsWriter, baseline_value_losses, policy_entropy
 from gomoku.net import NetConfig, PolicyValueNet, load_checkpoint, save_checkpoint, select_device
 from gomoku.replay import ReplayBuffer
 from gomoku.selfplay import SelfPlayConfig, play_games
+from gomoku.symmetry import N_SYMMETRIES
 
 log = logging.getLogger(__name__)
+
+# One position in ten is held out of each generation's optimisation batches,
+# purely so the parity honesty check is measured out of sample.
+HOLDOUT_EVERY = 10
+# Below this many held-out positions the baselines are noise -- a parity
+# baseline fitted to two or three positions reaches 0.0 and makes the check
+# unpassable -- so a tiny generation reports the in-sample number instead,
+# flagged by `value_loss_on_fresh_is_held_out`.
+MIN_HOLDOUT_POSITIONS = 8
 
 
 @dataclasses.dataclass(frozen=True)
@@ -86,9 +97,21 @@ def train(
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
     )
-    buffer = ReplayBuffer(config.buffer_capacity, config.replay_dir)
+    # Shards carry no run identity, so a reused run directory can hold shards
+    # from a different board. Recording the shape this run produces lets the
+    # buffer skip them at load time instead of failing on a random batch hours
+    # in.
+    sample_shape = (N_PLANES, config.selfplay.size, config.selfplay.size)
+    buffer = ReplayBuffer(config.buffer_capacity, config.replay_dir,
+                          sample_shape=sample_shape)
     metrics = MetricsWriter(config.metrics_path)
     start_generation = 0
+
+    if not resume:
+        removed = buffer.clear_shards()
+        if removed:
+            log.info("from-scratch run: deleted %d replay shard(s) in %s",
+                     removed, config.replay_dir)
 
     if resume and config.checkpoint_path.exists():
         payload = load_checkpoint(config.checkpoint_path, map_location=device)
@@ -123,7 +146,11 @@ def train(
             samples, stats = play_games(
                 evaluator, config.games_per_generation, config.selfplay, rng
             )
-        buffer.add(samples)
+        # Hold a slice of this generation's positions out of the optimisation
+        # so the parity honesty check below is measured out of sample. It is
+        # added to the buffer afterwards, so nothing is thrown away.
+        holdout, trainable = _split_holdout(samples)
+        buffer.add(trainable)
 
         net.train()
         policy_losses: list[float] = []
@@ -149,19 +176,33 @@ def train(
         # The batch losses above are averaged over the whole replay window,
         # while the baselines below describe this generation's fresh samples.
         # Comparing those two directly would drift as the window widens, so
-        # measure the value head on the same fresh samples the baselines use.
-        fresh_value_loss = _value_loss_on_samples(net, samples, device,
+        # measure the value head on the same fresh samples the baselines use --
+        # and on the held-out ones, so neither side of the comparison has seen
+        # the positions it is scored on.
+        held_out = len(holdout) >= MIN_HOLDOUT_POSITIONS * N_SYMMETRIES
+        evaluation = holdout if held_out else samples
+        if not held_out and samples:
+            log.warning(
+                "generation %d produced only %d held-out positions; reporting "
+                "an in-sample value_loss_on_fresh", generation,
+                len(holdout) // N_SYMMETRIES,
+            )
+        fresh_value_loss = _value_loss_on_samples(net, evaluation, device,
                                                   config.batch_size)
-        record = _diagnostics(generation, samples, stats, buffer,
-                              policy_losses, value_losses, fresh_value_loss,
-                              started)
+        # Whatever was measured, the holdout still belongs in the window.
+        buffer.add(holdout)
+        record = _diagnostics(generation, samples, evaluation, held_out, stats,
+                              buffer, policy_losses, value_losses,
+                              fresh_value_loss, started)
         metrics.write(record)
         log.info(
-            "gen %d policy %.3f value %.3f (fresh %.3f vs parity baseline "
-            "%.3f) black %.2f",
+            "gen %d policy %.3f value %.3f (%s %.3f vs parity baseline %.3f "
+            "on %s positions) black %.2f prefixes %d/%d",
             generation, record["policy_loss"], record["value_loss"],
+            "held-out" if held_out else "in-sample",
             record["value_loss_on_fresh"], record["value_baseline_parity"],
-            record["black_win_rate"],
+            record["value_baseline_group_sizes"], record["black_win_rate"],
+            record["distinct_play_prefixes"], stats.n_games,
         )
         buffer.save_shard(generation, samples=samples)
         buffer.prune_shards(config.buffer_capacity)
@@ -180,7 +221,8 @@ def _value_loss_on_samples(net, samples, device, batch_size: int) -> float:
     This is the number that belongs next to the baselines: both describe the
     same fresh positions, so `value_loss_on_fresh < value_baseline_parity` is
     an honest statement that the value head reads the board rather than the
-    side to move.
+    side to move. Pass the held-out positions where there are enough of them,
+    or the statement is about data the network was just fit on.
     """
     if not samples:
         return 0.0
@@ -196,30 +238,60 @@ def _value_loss_on_samples(net, samples, device, batch_size: int) -> float:
     return total / len(samples)
 
 
-def _diagnostics(generation, samples, stats, buffer, policy_losses,
-                 value_losses, fresh_value_loss, started) -> dict:
-    """Assemble one generation's metrics record, including the §3 diagnostics."""
+def _split_holdout(
+    samples: list, every: int = HOLDOUT_EVERY
+) -> tuple[list, list]:
+    """Split off every `every`-th POSITION, augmentations and all.
+
+    Splitting by sample would put seven of a position's eight symmetries in
+    the training set and call the eighth a holdout, which measures nothing:
+    the network would have been fit on the same board under a rotation. So
+    the block index -- `index // N_SYMMETRIES` -- decides, not the index.
+    """
+    holdout: list = []
+    trainable: list = []
+    for index, sample in enumerate(samples):
+        target = holdout if (index // N_SYMMETRIES) % every == 0 else trainable
+        target.append(sample)
+    return holdout, trainable
+
+
+def _diagnostics(generation, samples, evaluation, held_out, stats, buffer,
+                 policy_losses, value_losses, fresh_value_loss, started) -> dict:
+    """Assemble one generation's metrics record, including the §3 diagnostics.
+
+    `samples` is everything the generation produced -- entropy and the added
+    count describe all of it -- while `evaluation` is the subset the value
+    head was scored on, which is what the baselines must describe too.
+    """
     if samples:
-        policies = np.stack([s.policy for s in samples])
-        values = np.array([s.value for s in samples], dtype=np.float64)
+        entropy = policy_entropy(np.stack([s.policy for s in samples]))
+    else:
+        entropy = 0.0
+    if evaluation:
+        values = np.array([s.value for s in evaluation], dtype=np.float64)
         # Plane 3 is the side-to-move constant: 1 when black is to move.
-        is_black = np.array([bool(s.encoded[3].flat[0]) for s in samples])
+        is_black = np.array([bool(s.encoded[3].flat[0]) for s in evaluation])
         baselines = baseline_value_losses(values, is_black)
-        entropy = policy_entropy(policies)
+        group_sizes = [int(is_black.sum()), int((~is_black).sum())]
     else:
         baselines = {"constant": 0.0, "parity": 0.0}
-        entropy = 0.0
+        group_sizes = [0, 0]
     return {
         "generation": generation,
         "policy_loss": float(np.mean(policy_losses)) if policy_losses else 0.0,
         "value_loss": float(np.mean(value_losses)) if value_losses else 0.0,
         "value_loss_on_fresh": fresh_value_loss,
+        "value_loss_on_fresh_is_held_out": bool(held_out),
         "policy_entropy": entropy,
         "black_win_rate": stats.black_win_rate,
         "value_baseline_constant": baselines["constant"],
         "value_baseline_parity": baselines["parity"],
+        "value_baseline_group_sizes": group_sizes,
         "mean_game_length": stats.mean_length,
+        "length_quantiles": stats.length_quantiles(),
         "distinct_openings": len(stats.openings),
+        "distinct_play_prefixes": len(stats.play_prefixes),
         "buffer_size": len(buffer),
         "samples_added": len(samples),
         "seconds": time.monotonic() - started,

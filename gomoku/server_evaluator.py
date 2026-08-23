@@ -228,6 +228,7 @@ def run_selfplay_workers(
         combined.draws += worker_stats.draws
         combined.lengths.extend(worker_stats.lengths)
         combined.openings |= worker_stats.openings
+        combined.play_prefixes |= worker_stats.play_prefixes
     for process in processes:
         process.join(timeout=10)
         if process.is_alive():

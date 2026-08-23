@@ -1,8 +1,11 @@
 import numpy as np
+import pytest
 
-from gomoku.evaluator import UniformEvaluator
+from gomoku.evaluator import Evaluator, UniformEvaluator
 from gomoku.game import N_PLANES
+from gomoku.mcts import SearchConfig
 from gomoku.selfplay import (
+    PLAY_PREFIX_PLIES,
     GameStats,
     Sample,
     SelfPlayConfig,
@@ -160,3 +163,71 @@ def test_games_in_flight_does_not_change_the_game_count():
         _, stats = play_games(UniformEvaluator(), 5, config,
                               np.random.default_rng(1))
         assert stats.n_games == 5
+
+
+class CollapsedEvaluator(Evaluator):
+    """A policy that has collapsed onto one line: the lowest-numbered cell.
+
+    This is what section 3's diversity failure looks like from the outside --
+    the network plays the same moves whatever the position -- and it is the
+    thing the diversity diagnostics exist to catch.
+    """
+
+    def evaluate(self, encoded):
+        n_states = encoded.shape[0]
+        n_cells = encoded.shape[-1] * encoded.shape[-2]
+        weights = np.exp(-np.arange(n_cells, dtype=np.float64))
+        policies = np.tile(weights / weights.sum(), (n_states, 1))
+        return policies.astype(np.float32), np.zeros(n_states, dtype=np.float32)
+
+
+def test_distinct_play_prefixes_collapse_while_openings_stay_diverse():
+    """The contrast is the whole point.
+
+    `distinct_openings` counts moves the RNG imposed, so it reads healthy
+    however completely play collapses. Only the prefixes of moves the policy
+    chose can tell the difference.
+    """
+    config = SelfPlayConfig(
+        size=9, win_length=5, opening_plies=(2, 2), opening_radius=1,
+        full_simulations=4, fast_simulations=2, full_fraction=0.0,
+        temperature_plies=0, games_in_flight=8,
+        search=SearchConfig(add_noise=False),
+    )
+    _, stats = play_games(CollapsedEvaluator(), 8, config,
+                          np.random.default_rng(0))
+    assert len(stats.openings) >= 7
+    assert len(stats.play_prefixes) == 1
+    assert len(next(iter(stats.play_prefixes))) == PLAY_PREFIX_PLIES
+
+
+def test_distinct_play_prefixes_stay_high_when_play_is_varied():
+    config = small_config(full_fraction=0.0, games_in_flight=8)
+    _, stats = play_games(UniformEvaluator(), 8, config, np.random.default_rng(1))
+    assert len(stats.play_prefixes) >= 6
+
+
+def test_length_quantiles_describe_the_distribution():
+    stats = GameStats(lengths=[4, 4, 10, 10, 10])
+    assert stats.length_quantiles() == [4.0, 4.0, 10.0, 10.0, 10.0]
+    # A mean of 7.6 says "medium games"; the quantiles show there are none.
+    assert stats.mean_length == pytest.approx(7.6)
+
+
+def test_length_quantiles_of_no_games_are_zero():
+    assert GameStats().length_quantiles() == [0.0] * 5
+
+
+def test_opening_radius_means_exactly_that_many_cells_from_the_centre():
+    """The name is the contract: radius r, not r + 1."""
+    config = SelfPlayConfig(size=9, opening_radius=1, opening_plies=(2, 2))
+    rng = np.random.default_rng(7)
+    seen = set()
+    for _ in range(40):
+        _, opening = random_opening(rng, config)
+        for move in opening:
+            row, col = divmod(move, 9)
+            assert abs(row - 4) <= 1 and abs(col - 4) <= 1
+            seen.add((row, col))
+    # The whole 3x3 window is reachable, so the radius is not too small either.
+    assert len(seen) == 9

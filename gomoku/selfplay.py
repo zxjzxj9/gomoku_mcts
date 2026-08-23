@@ -53,6 +53,12 @@ class Sample:
     value: float
 
 
+# How many post-opening plies make up a game's "play prefix". Long enough
+# that two games sharing one are genuinely following the same line, short
+# enough that a healthy population still produces mostly distinct prefixes.
+PLAY_PREFIX_PLIES = 6
+
+
 @dataclasses.dataclass
 class GameStats:
     black_wins: int = 0
@@ -60,6 +66,11 @@ class GameStats:
     draws: int = 0
     lengths: list[int] = dataclasses.field(default_factory=list)
     openings: set[tuple[int, ...]] = dataclasses.field(default_factory=set)
+    # The first `PLAY_PREFIX_PLIES` moves each game CHOSE, after its imposed
+    # opening. `openings` counts moves drawn by the RNG, so it stays near
+    # 100% distinct however completely play collapses; this set is the one
+    # that actually measures the section 3 diversity risk.
+    play_prefixes: set[tuple[int, ...]] = dataclasses.field(default_factory=set)
 
     @property
     def n_games(self) -> int:
@@ -73,6 +84,20 @@ class GameStats:
     def mean_length(self) -> float:
         return float(np.mean(self.lengths)) if self.lengths else 0.0
 
+    def length_quantiles(self) -> list[float]:
+        """[min, p25, p50, p75, max] of the game lengths, or zeros if empty.
+
+        The mean alone hides exactly the shape narrowing produces: a run
+        splitting into quick black wins and long stalemates keeps its mean
+        while the distribution goes bimodal.
+        """
+        if not self.lengths:
+            return [0.0] * 5
+        lengths = np.asarray(self.lengths, dtype=np.float64)
+        return [float(np.min(lengths)),
+                *(float(q) for q in np.percentile(lengths, [25, 50, 75])),
+                float(np.max(lengths))]
+
 
 def random_opening(
     rng: np.random.Generator,
@@ -81,8 +106,11 @@ def random_opening(
     """A random legal opening of 2-4 plies drawn from cells near the centre."""
     low, high = config.opening_plies
     centre = config.size // 2
-    span = config.opening_radius + 1
-    rows = np.arange(max(0, centre - span), min(config.size, centre + span + 1))
+    radius = config.opening_radius
+    # A radius of r spans exactly r cells each way from the centre, so the
+    # window is (2r + 1) wide. The name is load-bearing: it appears in two
+    # public dataclasses and in the arena's opening configuration.
+    rows = np.arange(max(0, centre - radius), min(config.size, centre + radius + 1))
     pool = np.array([r * config.size + c for r in rows for c in rows])
     while True:
         n_plies = int(rng.integers(low, high + 1))
@@ -122,6 +150,8 @@ class _Game:
         self.opening = opening
         self.tree = MCTS(state, config.search, rng)
         self.records: list[_Record] = []
+        # Moves this game chose, in order -- not the imposed opening.
+        self.played: list[int] = []
 
 
 def play_games(
@@ -180,6 +210,8 @@ def _run_batch(games, evaluator, config, rng) -> None:
                 else 0.0
             )
             move = sample_move(counts, temperature, rng)
+            if len(game.played) < PLAY_PREFIX_PLIES:
+                game.played.append(int(move))
             # `run_search` targets a TOTAL root-visit count and `advance`
             # rebases on the reused subtree, so a cheap move after an
             # expensive one often runs no new simulations at all and plays on
@@ -208,6 +240,7 @@ def _finish(game: _Game, stats: GameStats, config: SelfPlayConfig) -> list[Sampl
     else:
         stats.white_wins += 1
     stats.lengths.append(game.state.ply)
+    stats.play_prefixes.add(tuple(game.played))
     samples: list[Sample] = []
     for record in game.records:
         if winner == 0:
