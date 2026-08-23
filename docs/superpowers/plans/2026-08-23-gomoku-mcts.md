@@ -309,6 +309,8 @@ class Board:
         size = self.size
         row, col = divmod(move, size)
         grid = self.grid
+        if grid[row, col] != player:
+            return None
         for d_row, d_col in DIRECTIONS:
             cells = [(row, col)]
             for step in (1, -1):
@@ -328,7 +330,7 @@ class Board:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_board.py -q`
-Expected: PASS, 15 passed.
+Expected: PASS, 17 passed (13 test functions, one of them parametrized four ways).
 
 - [ ] **Step 6: Commit**
 
