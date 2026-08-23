@@ -3277,14 +3277,18 @@ class ReplayBuffer:
             return None
         self.directory.mkdir(parents=True, exist_ok=True)
         path = self.directory / f"shard_{generation:06d}.npz"
-        tmp = path.with_suffix(".npz.tmp")
+        # `savez_compressed` appends `.npz` to any name not already ending in
+        # it, so the temp file must be named without that suffix and the
+        # written file reconstructed before the rename. The `.tmp` name also
+        # keeps the partial file out of `load_shards`'s `shard_*.npz` glob.
+        tmp = self.directory / f"shard_{generation:06d}.tmp"
         np.savez_compressed(
-            tmp,
+            str(tmp),
             encoded=np.stack([s.encoded for s in self._samples]),
             policy=np.stack([s.policy for s in self._samples]),
             value=np.array([s.value for s in self._samples], dtype=np.float32),
         )
-        tmp.replace(path)
+        (tmp.parent / f"{tmp.name}.npz").replace(path)
         return path
 
     def load_shards(self) -> int:
