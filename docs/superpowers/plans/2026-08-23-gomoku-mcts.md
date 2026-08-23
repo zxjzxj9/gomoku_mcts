@@ -2333,7 +2333,7 @@ git commit -m "feat: PUCT search with virtual loss and batched leaf evaluation"
 
 **Interfaces:**
 - Consumes: `gomoku.mcts.{MCTS, SearchConfig, run_search}`, `gomoku.evaluator.Evaluator`, `gomoku.players.Player`.
-- Produces: `players.sample_move(counts: np.ndarray, temperature: float, rng) -> int`; `players.MCTSPlayer(evaluator, simulations, temperature=0.0, policy_only=False, config=None, rng=None, name="mcts", leaf_batch=8)`; `difficulty.Level` frozen dataclass with `index: int`, `name: str`, `simulations: int`, `temperature: float`, `policy_only: bool`, `elo: int | None`; `difficulty.LEVELS: tuple[Level, ...]` (five entries, indices 1-5); `difficulty.load_levels(elo_path=None) -> tuple[Level, ...]`; `difficulty.make_player(level, evaluator, rng) -> Player`.
+- Produces: `players.sample_move(counts: np.ndarray, temperature: float, rng) -> int`; `players.MCTSPlayer(evaluator, simulations, temperature=0.0, policy_only=False, config=None, rng=None, name="mcts", leaf_batch=8)`; `difficulty.Level` frozen dataclass with `index: int`, `name: str`, `simulations: int`, `temperature: float`, `policy_only: bool`, `elo: int | None`; `difficulty.LEVELS: tuple[Level, ...]` (five entries, indices 1-5); `difficulty.load_levels(elo_path=DEFAULT_ELO_PATH) -> tuple[Level, ...]` (pass `None` to skip the file entirely and get unrated levels); `difficulty.make_player(level, evaluator, rng) -> Player`.
 
 `elo` is `None` until Task 14's arena measures it. The UI must render "unrated" rather than invent a number.
 
