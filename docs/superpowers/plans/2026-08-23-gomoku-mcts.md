@@ -1845,7 +1845,6 @@ The split between `collect` and `apply` is what makes batching possible: a tree 
 import numpy as np
 import pytest
 
-from gomoku.board import BLACK, WHITE
 from gomoku.evaluator import Evaluator, UniformEvaluator
 from gomoku.game import GameState
 from gomoku.mcts import MCTS, SearchConfig, run_search, search
@@ -1876,11 +1875,15 @@ def test_search_blocks_an_immediate_loss():
     search has no guidance at all -- it must visit each root child, then each
     of that child's replies. On a 9x9 board with ~74 legal moves that costs a
     few thousand simulations, so the position is posed on a small board where
-    the refutation is genuinely reachable within the budget."""
-    # Black has three at 6, 7, 8 and completes four at 5 or 9. White to move.
-    s = state_with([6, 0, 7, 1, 8], size=5, win_length=4)
+    the refutation is genuinely reachable within the budget.
+
+    White already holds 5, so black's three at 6, 7, 8 have exactly one
+    winning completion. There is a single correct move and the search must
+    find it -- an open three at both ends would be unblockable, and the test
+    would then only be measuring which loss is slowest."""
+    s = state_with([6, 5, 7, 0, 8], size=5, win_length=4)
     counts = search(s, UniformEvaluator(), simulations=600, config=quiet_config())
-    assert int(np.argmax(counts)) in (5, 9)
+    assert int(np.argmax(counts)) == 9
 
 
 def test_visits_are_zero_on_occupied_cells():
@@ -1976,6 +1979,11 @@ def test_noise_is_reproducible_for_a_seed():
     for tree in trees:
         run_search([tree], UniformEvaluator(), 30)
     assert np.allclose(trees[0].visit_counts(), trees[1].visit_counts())
+    # A different seed must actually change the search, or this test would
+    # pass just as well against an implementation that ignores noise entirely.
+    other = MCTS(s, SearchConfig(), np.random.default_rng(12))
+    run_search([other], UniformEvaluator(), 30)
+    assert not np.allclose(trees[0].visit_counts(), other.visit_counts())
 
 
 def test_run_search_pools_leaves_from_several_trees():
@@ -2102,6 +2110,11 @@ class MCTS:
 
         Terminal leaves are backed up here and do not appear in the result, so
         the returned array may be shorter than `n_leaves` -- or empty.
+
+        Each `collect` must be followed by exactly one `apply` carrying that
+        call's evaluations. Pending leaves accumulate until `apply` drains
+        them, so two `collect` calls in a row leave the tree holding virtual
+        loss it cannot resolve.
         """
         encoded: list[np.ndarray] = []
         for _ in range(max(0, n_leaves)):
@@ -2220,11 +2233,24 @@ class MCTS:
         asking for N simulations gets a root with N total visits rather than
         N fresh ones on top of the inherited subtree.
         """
+        # Any descent still pending has virtual loss applied along its path.
+        # Re-rooting without undoing it would leave inflated N and depressed W
+        # in the retained subtree, and would strand `pending` flags that block
+        # descent through those nodes forever.
+        for node, path in self._pending:
+            node.pending = False
+            self._undo_virtual_loss(path)
+        self._pending.clear()
+
         index = int(np.flatnonzero(self.root.moves == move)[0])
         child = self.root.children[index]
         self.root = child if child is not None else Node(self.root.state.play(move))
-        self._pending.clear()
         self.root.pending = False
+        # The new root was expanded during the previous search, when it was an
+        # interior node and therefore got no exploration noise. Apply it now,
+        # or self-play would only ever see noise on the first move of a game.
+        if self.config.add_noise and self.root.expanded:
+            self.root.P = self._with_noise(self.root.P).astype(np.float32)
         self.simulations = int(self.root.N.sum())
 
 
