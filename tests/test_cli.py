@@ -1,6 +1,5 @@
 import json
 
-import numpy as np
 import pytest
 
 from gomoku.cli import main
@@ -61,7 +60,20 @@ def test_play_subcommand_explains_itself_without_a_terminal(monkeypatch, capsys)
     assert "interactive terminal" in capsys.readouterr().out
 
 
-def test_play_subcommand_builds_everything_without_launching(tmp_path):
-    """--no-launch exercises checkpoint and level loading with no UI."""
+def test_play_subcommand_builds_everything_without_launching(tmp_path, capsys):
+    """--no-launch exercises checkpoint and level loading with no UI.
+
+    Asserting only the return code would pass even if `_play` never loaded
+    anything, so check it reported what it found."""
     assert main(["play", "--no-launch", "--checkpoint", str(tmp_path / "none.pt"),
                  "--elo", str(tmp_path / "none.json")]) == 0
+    assert "No checkpoint found" in capsys.readouterr().out
+
+
+def test_play_subcommand_reports_a_loaded_checkpoint(tmp_path, capsys):
+    checkpoint = tmp_path / "checkpoint.pt"
+    config = NetConfig(channels=8, blocks=1)
+    save_checkpoint(checkpoint, PolicyValueNet(config), None, 5, config, {})
+    assert main(["play", "--no-launch", "--checkpoint", str(checkpoint),
+                 "--elo", str(tmp_path / "none.json"), "--device", "cpu"]) == 0
+    assert "generation 5" in capsys.readouterr().out

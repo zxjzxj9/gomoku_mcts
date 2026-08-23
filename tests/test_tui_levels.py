@@ -1,7 +1,6 @@
 import json
 
 import numpy as np
-import pytest
 
 from gomoku.difficulty import load_levels
 from gomoku.tui.app import GomokuApp

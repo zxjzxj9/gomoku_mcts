@@ -1,5 +1,4 @@
 import numpy as np
-import torch
 
 from gomoku.difficulty import LEVELS
 from gomoku.engine import build_opponent, load_evaluator

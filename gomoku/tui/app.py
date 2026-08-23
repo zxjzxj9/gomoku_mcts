@@ -13,7 +13,7 @@ from textual.containers import Vertical
 from textual.widgets import Footer, Header, Static
 
 from gomoku.board import BLACK, WHITE
-from gomoku.difficulty import LEVELS, Level, load_levels
+from gomoku.difficulty import Level, load_levels
 from gomoku.engine import build_opponent
 from gomoku.evaluator import Evaluator
 from gomoku.game import GameState
