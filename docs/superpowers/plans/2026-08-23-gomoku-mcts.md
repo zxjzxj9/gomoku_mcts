@@ -3188,6 +3188,37 @@ def test_load_shards_respects_capacity(tmp_path):
     assert len(reader) == 6
 
 
+def test_save_shard_writes_only_the_samples_it_is_given(tmp_path):
+    buffer = ReplayBuffer(capacity=100, directory=tmp_path)
+    buffer.add(make_samples(6))
+    fresh = make_samples(2)
+    buffer.add(fresh)
+    buffer.save_shard(generation=0, samples=fresh)
+
+    reader = ReplayBuffer(capacity=100, directory=tmp_path)
+    assert reader.load_shards() == 2
+
+
+def test_prune_shards_keeps_just_enough_to_refill_the_buffer(tmp_path):
+    writer = ReplayBuffer(capacity=100, directory=tmp_path)
+    for generation in range(5):
+        batch = make_samples(4)
+        writer.add(batch)
+        writer.save_shard(generation, samples=batch)
+
+    # Newest-first, three shards (12 samples) are the fewest covering 10.
+    assert writer.prune_shards(keep_samples=10) == 2
+    assert len(list(tmp_path.glob("shard_*.npz"))) == 3
+
+
+def test_prune_shards_keeps_everything_when_there_is_too_little(tmp_path):
+    writer = ReplayBuffer(capacity=100, directory=tmp_path)
+    writer.add(make_samples(4))
+    writer.save_shard(0)
+    assert writer.prune_shards(keep_samples=1000) == 0
+    assert len(list(tmp_path.glob("shard_*.npz"))) == 1
+
+
 def test_save_shard_without_a_directory_is_a_no_op():
     buffer = ReplayBuffer(capacity=10)
     buffer.add(make_samples(2))
@@ -3271,9 +3302,22 @@ class ReplayBuffer:
 
     # -- persistence ----------------------------------------------------
 
-    def save_shard(self, generation: int) -> Path | None:
-        """Write the current window to `shard_%06d.npz`. No directory, no shard."""
-        if self.directory is None or not self._samples:
+    def save_shard(
+        self,
+        generation: int,
+        samples: list[Sample] | None = None,
+    ) -> Path | None:
+        """Write `samples` to `shard_%06d.npz`. No directory, no shard.
+
+        Pass the generation's new samples rather than letting this default to
+        the whole window: a shard per generation each holding the entire
+        buffer makes disk use quadratic in the number of generations, and
+        fills a resumed buffer with duplicates of the same old positions.
+        """
+        if self.directory is None:
+            return None
+        samples = list(self._samples) if samples is None else list(samples)
+        if not samples:
             return None
         self.directory.mkdir(parents=True, exist_ok=True)
         path = self.directory / f"shard_{generation:06d}.npz"
@@ -3284,9 +3328,9 @@ class ReplayBuffer:
         tmp = self.directory / f"shard_{generation:06d}.tmp"
         np.savez_compressed(
             str(tmp),
-            encoded=np.stack([s.encoded for s in self._samples]),
-            policy=np.stack([s.policy for s in self._samples]),
-            value=np.array([s.value for s in self._samples], dtype=np.float32),
+            encoded=np.stack([s.encoded for s in samples]),
+            policy=np.stack([s.policy for s in samples]),
+            value=np.array([s.value for s in samples], dtype=np.float32),
         )
         (tmp.parent / f"{tmp.name}.npz").replace(path)
         return path
@@ -3309,6 +3353,35 @@ class ReplayBuffer:
             )
             loaded += len(value)
         return min(loaded, self.capacity) if loaded else 0
+
+    def prune_shards(self, keep_samples: int) -> int:
+        """Delete the oldest shards the buffer can no longer hold.
+
+        Shards accumulate one per generation, so without pruning a long run
+        keeps far more history on disk than `capacity` can ever load. Walks
+        newest-first and keeps just enough shards to refill the buffer.
+        Returns the number of shards deleted.
+        """
+        if self.directory is None or not self.directory.exists():
+            return 0
+        paths = sorted(self.directory.glob("shard_*.npz"))
+        counts = []
+        for path in paths:
+            try:
+                with np.load(path) as data:
+                    counts.append(len(data["value"]))
+            except (OSError, ValueError, KeyError):
+                counts.append(0)
+        keep_from = 0
+        running = 0
+        for index in range(len(paths) - 1, -1, -1):
+            running += counts[index]
+            if running >= keep_samples:
+                keep_from = index
+                break
+        for path in paths[:keep_from]:
+            path.unlink()
+        return keep_from
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
@@ -3453,6 +3526,8 @@ def baseline_value_losses(
 ) -> dict[str, float]:
     """Mean-squared error of the constant and parity predictors."""
     values = np.asarray(values, dtype=np.float64)
+    if values.size == 0:
+        return {"constant": 0.0, "parity": 0.0}
     mask = np.asarray(is_black_to_move, dtype=bool)
     constant = float(((values - values.mean()) ** 2).mean())
     predicted = np.empty_like(values)
@@ -3554,11 +3629,19 @@ def test_train_produces_a_checkpoint_and_metrics(tmp_path):
     records = MetricsWriter(tmp_path / "metrics.jsonl").read_all()
     assert len(records) == 2
     for record in records:
-        for key in ("generation", "policy_loss", "value_loss", "policy_entropy",
+        for key in ("generation", "policy_loss", "value_loss",
+                    "value_loss_on_fresh", "policy_entropy",
                     "black_win_rate", "value_baseline_constant",
                     "value_baseline_parity", "mean_game_length",
                     "distinct_openings", "buffer_size", "seconds"):
             assert key in record
+        # Presence alone would pass against an all-zero or NaN record.
+        assert record["policy_loss"] > 0.0
+        assert record["value_baseline_constant"] > 0.0
+        assert 0.0 <= record["black_win_rate"] <= 1.0
+        assert record["policy_entropy"] > 0.0
+        assert record["buffer_size"] > 0
+        assert record["distinct_openings"] >= 1
 
 
 def test_train_resumes_from_the_last_checkpoint(tmp_path):
@@ -3569,9 +3652,18 @@ def test_train_resumes_from_the_last_checkpoint(tmp_path):
 
 
 def test_train_from_scratch_ignores_an_existing_checkpoint(tmp_path):
+    """The generation counter alone cannot detect this.
+
+    With a checkpoint at generation 2 and `generations=2`, a run that wrongly
+    resumed would execute `range(2, 2)` -- nothing at all -- and leave the
+    checkpoint reading 2, exactly what a correct from-scratch run produces. So
+    ask for three generations and check the metrics log records all of them."""
     train(tiny_config(tmp_path), np.random.default_rng(0))
-    path = train(tiny_config(tmp_path), np.random.default_rng(0), resume=False)
-    assert load_checkpoint(path)["generation"] == 2
+    path = train(tiny_config(tmp_path, generations=3), np.random.default_rng(0),
+                 resume=False)
+    assert load_checkpoint(path)["generation"] == 3
+    records = MetricsWriter(tmp_path / "metrics.jsonl").read_all()
+    assert [r["generation"] for r in records] == [0, 1, 0, 1, 2]
 
 
 def test_replay_shards_are_written(tmp_path):
@@ -3667,6 +3759,9 @@ def train(
     resume: bool = True,
 ) -> Path:
     device = select_device(config.device)
+    # Network init and dropout draw from torch's global RNG, so seed it from
+    # the caller's generator or two runs with the same seed still diverge.
+    torch.manual_seed(int(rng.integers(0, 2**31 - 1)))
     net = PolicyValueNet(config.net).to(device)
     optimizer = torch.optim.AdamW(
         net.parameters(),
@@ -3718,15 +3813,25 @@ def train(
             policy_losses.append(float(policy_loss.detach().cpu()))
             value_losses.append(float(value_loss.detach().cpu()))
 
+        # The batch losses above are averaged over the whole replay window,
+        # while the baselines below describe this generation's fresh samples.
+        # Comparing those two directly would drift as the window widens, so
+        # measure the value head on the same fresh samples the baselines use.
+        fresh_value_loss = _value_loss_on_samples(net, samples, device,
+                                                  config.batch_size)
         record = _diagnostics(generation, samples, stats, buffer,
-                              policy_losses, value_losses, started)
+                              policy_losses, value_losses, fresh_value_loss,
+                              started)
         metrics.write(record)
         log.info(
-            "gen %d policy %.3f value %.3f (parity baseline %.3f) black %.2f",
+            "gen %d policy %.3f value %.3f (fresh %.3f vs parity baseline "
+            "%.3f) black %.2f",
             generation, record["policy_loss"], record["value_loss"],
-            record["value_baseline_parity"], record["black_win_rate"],
+            record["value_loss_on_fresh"], record["value_baseline_parity"],
+            record["black_win_rate"],
         )
-        buffer.save_shard(generation)
+        buffer.save_shard(generation, samples=samples)
+        buffer.prune_shards(config.buffer_capacity)
         save_checkpoint(
             config.checkpoint_path, net, optimizer, generation + 1,
             config.net, extra={"buffer_size": len(buffer)},
@@ -3735,8 +3840,31 @@ def train(
     return config.checkpoint_path
 
 
+@torch.inference_mode()
+def _value_loss_on_samples(net, samples, device, batch_size: int) -> float:
+    """Mean squared error of the value head on `samples`.
+
+    This is the number that belongs next to the baselines: both describe the
+    same fresh positions, so `value_loss_on_fresh < value_baseline_parity` is
+    an honest statement that the value head reads the board rather than the
+    side to move.
+    """
+    if not samples:
+        return 0.0
+    net.eval()
+    total = 0.0
+    for start in range(0, len(samples), batch_size):
+        chunk = samples[start : start + batch_size]
+        x = torch.from_numpy(np.stack([s.encoded for s in chunk])).to(device)
+        target = torch.tensor([s.value for s in chunk], dtype=torch.float32,
+                              device=device)
+        _, value = net(x)
+        total += float(((value - target) ** 2).sum())
+    return total / len(samples)
+
+
 def _diagnostics(generation, samples, stats, buffer, policy_losses,
-                 value_losses, started) -> dict:
+                 value_losses, fresh_value_loss, started) -> dict:
     """Assemble one generation's metrics record, including the §3 diagnostics."""
     if samples:
         policies = np.stack([s.policy for s in samples])
@@ -3752,6 +3880,7 @@ def _diagnostics(generation, samples, stats, buffer, policy_losses,
         "generation": generation,
         "policy_loss": float(np.mean(policy_losses)) if policy_losses else 0.0,
         "value_loss": float(np.mean(value_losses)) if value_losses else 0.0,
+        "value_loss_on_fresh": fresh_value_loss,
         "policy_entropy": entropy,
         "black_win_rate": stats.black_win_rate,
         "value_baseline_constant": baselines["constant"],
@@ -3950,10 +4079,14 @@ def test_losses_fall_over_training(trained):
 
 
 def test_value_head_beats_the_parity_baseline(trained):
-    """The §3 diagnostic: the value head must learn more than 'black is winning'."""
+    """The §3 diagnostic: the value head must learn more than 'black is winning'.
+
+    Compare against `value_loss_on_fresh`, not `value_loss`: the latter is
+    averaged over the whole replay window during optimisation, while the
+    baselines describe this generation's fresh samples."""
     _, records = trained
     final = records[-1]
-    assert final["value_loss"] < final["value_baseline_parity"]
+    assert final["value_loss_on_fresh"] < final["value_baseline_parity"]
 
 
 def test_exploration_does_not_collapse(trained):
