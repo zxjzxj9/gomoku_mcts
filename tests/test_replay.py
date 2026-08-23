@@ -97,6 +97,37 @@ def test_load_shards_respects_capacity(tmp_path):
     assert len(reader) == 6
 
 
+def test_save_shard_writes_only_the_samples_it_is_given(tmp_path):
+    buffer = ReplayBuffer(capacity=100, directory=tmp_path)
+    buffer.add(make_samples(6))
+    fresh = make_samples(2)
+    buffer.add(fresh)
+    buffer.save_shard(generation=0, samples=fresh)
+
+    reader = ReplayBuffer(capacity=100, directory=tmp_path)
+    assert reader.load_shards() == 2
+
+
+def test_prune_shards_keeps_just_enough_to_refill_the_buffer(tmp_path):
+    writer = ReplayBuffer(capacity=100, directory=tmp_path)
+    for generation in range(5):
+        batch = make_samples(4)
+        writer.add(batch)
+        writer.save_shard(generation, samples=batch)
+
+    # Newest-first, three shards (12 samples) are the fewest covering 10.
+    assert writer.prune_shards(keep_samples=10) == 2
+    assert len(list(tmp_path.glob("shard_*.npz"))) == 3
+
+
+def test_prune_shards_keeps_everything_when_there_is_too_little(tmp_path):
+    writer = ReplayBuffer(capacity=100, directory=tmp_path)
+    writer.add(make_samples(4))
+    writer.save_shard(0)
+    assert writer.prune_shards(keep_samples=1000) == 0
+    assert len(list(tmp_path.glob("shard_*.npz"))) == 1
+
+
 def test_save_shard_without_a_directory_is_a_no_op():
     buffer = ReplayBuffer(capacity=10)
     buffer.add(make_samples(2))

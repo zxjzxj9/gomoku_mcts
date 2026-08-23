@@ -75,6 +75,9 @@ def train(
     resume: bool = True,
 ) -> Path:
     device = select_device(config.device)
+    # Network init and dropout draw from torch's global RNG, so seed it from
+    # the caller's generator or two runs with the same seed still diverge.
+    torch.manual_seed(int(rng.integers(0, 2**31 - 1)))
     net = PolicyValueNet(config.net).to(device)
     optimizer = torch.optim.AdamW(
         net.parameters(),
@@ -126,15 +129,25 @@ def train(
             policy_losses.append(float(policy_loss.detach().cpu()))
             value_losses.append(float(value_loss.detach().cpu()))
 
+        # The batch losses above are averaged over the whole replay window,
+        # while the baselines below describe this generation's fresh samples.
+        # Comparing those two directly would drift as the window widens, so
+        # measure the value head on the same fresh samples the baselines use.
+        fresh_value_loss = _value_loss_on_samples(net, samples, device,
+                                                  config.batch_size)
         record = _diagnostics(generation, samples, stats, buffer,
-                              policy_losses, value_losses, started)
+                              policy_losses, value_losses, fresh_value_loss,
+                              started)
         metrics.write(record)
         log.info(
-            "gen %d policy %.3f value %.3f (parity baseline %.3f) black %.2f",
+            "gen %d policy %.3f value %.3f (fresh %.3f vs parity baseline "
+            "%.3f) black %.2f",
             generation, record["policy_loss"], record["value_loss"],
-            record["value_baseline_parity"], record["black_win_rate"],
+            record["value_loss_on_fresh"], record["value_baseline_parity"],
+            record["black_win_rate"],
         )
-        buffer.save_shard(generation)
+        buffer.save_shard(generation, samples=samples)
+        buffer.prune_shards(config.buffer_capacity)
         save_checkpoint(
             config.checkpoint_path, net, optimizer, generation + 1,
             config.net, extra={"buffer_size": len(buffer)},
@@ -143,8 +156,31 @@ def train(
     return config.checkpoint_path
 
 
+@torch.inference_mode()
+def _value_loss_on_samples(net, samples, device, batch_size: int) -> float:
+    """Mean squared error of the value head on `samples`.
+
+    This is the number that belongs next to the baselines: both describe the
+    same fresh positions, so `value_loss_on_fresh < value_baseline_parity` is
+    an honest statement that the value head reads the board rather than the
+    side to move.
+    """
+    if not samples:
+        return 0.0
+    net.eval()
+    total = 0.0
+    for start in range(0, len(samples), batch_size):
+        chunk = samples[start : start + batch_size]
+        x = torch.from_numpy(np.stack([s.encoded for s in chunk])).to(device)
+        target = torch.tensor([s.value for s in chunk], dtype=torch.float32,
+                              device=device)
+        _, value = net(x)
+        total += float(((value - target) ** 2).sum())
+    return total / len(samples)
+
+
 def _diagnostics(generation, samples, stats, buffer, policy_losses,
-                 value_losses, started) -> dict:
+                 value_losses, fresh_value_loss, started) -> dict:
     """Assemble one generation's metrics record, including the §3 diagnostics."""
     if samples:
         policies = np.stack([s.policy for s in samples])
@@ -160,6 +196,7 @@ def _diagnostics(generation, samples, stats, buffer, policy_losses,
         "generation": generation,
         "policy_loss": float(np.mean(policy_losses)) if policy_losses else 0.0,
         "value_loss": float(np.mean(value_losses)) if value_losses else 0.0,
+        "value_loss_on_fresh": fresh_value_loss,
         "policy_entropy": entropy,
         "black_win_rate": stats.black_win_rate,
         "value_baseline_constant": baselines["constant"],

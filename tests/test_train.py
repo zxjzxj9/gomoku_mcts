@@ -59,11 +59,19 @@ def test_train_produces_a_checkpoint_and_metrics(tmp_path):
     records = MetricsWriter(tmp_path / "metrics.jsonl").read_all()
     assert len(records) == 2
     for record in records:
-        for key in ("generation", "policy_loss", "value_loss", "policy_entropy",
+        for key in ("generation", "policy_loss", "value_loss",
+                    "value_loss_on_fresh", "policy_entropy",
                     "black_win_rate", "value_baseline_constant",
                     "value_baseline_parity", "mean_game_length",
                     "distinct_openings", "buffer_size", "seconds"):
             assert key in record
+        # Presence alone would pass against an all-zero or NaN record.
+        assert record["policy_loss"] > 0.0
+        assert record["value_baseline_constant"] > 0.0
+        assert 0.0 <= record["black_win_rate"] <= 1.0
+        assert record["policy_entropy"] > 0.0
+        assert record["buffer_size"] > 0
+        assert record["distinct_openings"] >= 1
 
 
 def test_train_resumes_from_the_last_checkpoint(tmp_path):
@@ -74,9 +82,18 @@ def test_train_resumes_from_the_last_checkpoint(tmp_path):
 
 
 def test_train_from_scratch_ignores_an_existing_checkpoint(tmp_path):
+    """The generation counter alone cannot detect this.
+
+    With a checkpoint at generation 2 and `generations=2`, a run that wrongly
+    resumed would execute `range(2, 2)` -- nothing at all -- and leave the
+    checkpoint reading 2, exactly what a correct from-scratch run produces. So
+    ask for three generations and check the metrics log records all of them."""
     train(tiny_config(tmp_path), np.random.default_rng(0))
-    path = train(tiny_config(tmp_path), np.random.default_rng(0), resume=False)
-    assert load_checkpoint(path)["generation"] == 2
+    path = train(tiny_config(tmp_path, generations=3), np.random.default_rng(0),
+                 resume=False)
+    assert load_checkpoint(path)["generation"] == 3
+    records = MetricsWriter(tmp_path / "metrics.jsonl").read_all()
+    assert [r["generation"] for r in records] == [0, 1, 0, 1, 2]
 
 
 def test_replay_shards_are_written(tmp_path):

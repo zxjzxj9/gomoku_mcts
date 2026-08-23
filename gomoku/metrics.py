@@ -30,6 +30,8 @@ def baseline_value_losses(
 ) -> dict[str, float]:
     """Mean-squared error of the constant and parity predictors."""
     values = np.asarray(values, dtype=np.float64)
+    if values.size == 0:
+        return {"constant": 0.0, "parity": 0.0}
     mask = np.asarray(is_black_to_move, dtype=bool)
     constant = float(((values - values.mean()) ** 2).mean())
     predicted = np.empty_like(values)
