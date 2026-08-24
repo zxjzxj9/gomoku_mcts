@@ -1,7 +1,15 @@
 __pycache__/
 *.pyc
 .venv/
-runs/
 data/
-*.pt
 *.egg-info/
+*.pt
+
+# Training runs are scratch, with two exceptions: the released 9x9 model and
+# the ratings measured from it. Negations come after *.pt so they win.
+runs/*
+!runs/elo.json
+!runs/9x9/
+runs/9x9/*
+!runs/9x9/checkpoint.pt
+!runs/9x9/metrics.jsonl

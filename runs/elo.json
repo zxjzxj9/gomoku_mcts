@@ -1,0 +1,18 @@
+{
+  "ratings": {
+    "level1": 988.4076414880383,
+    "level2": 1002.7602551884013,
+    "level3": 1339.0458822474516,
+    "level4": 1448.5007791577377,
+    "level5": 1506.7259195845731,
+    "heuristic": 1200.0
+  },
+  "metadata": {
+    "games_per_pair": 20,
+    "generation": 200,
+    "size": 9,
+    "win_length": 5,
+    "anchor": "heuristic",
+    "anchor_rating": 1200.0
+  }
+}
