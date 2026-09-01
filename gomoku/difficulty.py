@@ -44,7 +44,12 @@ class Level:
 
 LEVELS: tuple[Level, ...] = (
     Level(1, "Beginner", simulations=0, temperature=1.0, policy_only=True),
-    Level(2, "Casual", simulations=25, temperature=0.6, policy_only=False),
+    # 25 simulations left the visit counts nearly flat -- 11 moves visited with
+    # a top share of 0.21 -- and sampling that at temperature 0.6 discarded what
+    # little signal the search had, so this level played its raw policy and
+    # measured within 14 ELO of level 1. Doubling the budget makes the counts
+    # informative and the cooler temperature keeps them.
+    Level(2, "Casual", simulations=50, temperature=0.5, policy_only=False),
     Level(3, "Club", simulations=100, temperature=0.3, policy_only=False),
     Level(4, "Strong", simulations=400, temperature=0.0, policy_only=False),
     Level(5, "Expert", simulations=1600, temperature=0.0, policy_only=False),

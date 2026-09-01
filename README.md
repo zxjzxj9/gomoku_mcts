@@ -28,24 +28,27 @@ about 2.6 hours on an M-series Mac. A 6-block, 64-channel residual network.
 
 Its ratings, measured by the arena in `runs/elo.json`:
 
-| Level | Name     | Simulations | Temperature | Measured ELO |
-|------:|----------|------------:|------------:|-------------:|
-| 1     | Beginner | 0 (policy only) | 1.0     |  988 |
-| 2     | Casual   |          25 | 0.6         | 1003 |
-| —     | *heuristic anchor* | — | —         | *1200* |
-| 3     | Club     |         100 | 0.3         | 1339 |
-| 4     | Strong   |         400 | 0.0         | 1449 |
-| 5     | Expert   |        1600 | 0.0         | 1507 |
+| Level | Name     | Simulations | Temperature | Measured ELO | Gap |
+|------:|----------|------------:|------------:|-------------:|----:|
+| 1     | Beginner | 0 (policy only) | 1.0     |  950 |     |
+| 2     | Casual   |          50 | 0.5         | 1204 | +254 |
+| —     | *heuristic anchor* | — | —         | *1200* | |
+| 3     | Club     |         100 | 0.3         | 1371 | +167 |
+| 4     | Strong   |         400 | 0.0         | 1476 | +105 |
+| 5     | Expert   |        1600 | 0.0         | 1522 |  +46 |
 
 The ratings are anchored by pinning a fixed rule-based bot at a nominal 1200,
 so they are comparable across runs but are not calibrated against human ratings.
-Levels 1–2 are weaker than that rule-based bot; levels 3–5 beat it.
+Level 1 is weaker than that rule-based bot, level 2 is about even with it (they
+drew 10–10), and levels 3–5 beat it.
 
-**Known limitation: levels 1 and 2 are not meaningfully different.** They sit 14
-ELO apart, and their head-to-head record was 9–11 in 20 games — within noise. The
-design target was gaps of roughly 150 ELO, and only the 2→3 step clears it (336;
-3→4 is 110 and 4→5 is 58). Raising level 2's simulation count or lowering its
-temperature would separate it from level 1, at the cost of re-running the arena.
+**Known limitation: the top of the ladder is compressed.** The 3→4 and 4→5 steps
+are 105 and 46 ELO against a design target of roughly 150. This is search
+saturation rather than a tuning mistake: each 4× increase in simulations buys
+less than the one before (100→400 gains 105, 400→1600 gains 46), because
+additional search cannot outrun the quality of the network's own evaluation.
+Level 5 takes only ~0.5s per move, so there is compute headroom — but widening
+that gap meaningfully needs a better-trained network, not a bigger budget.
 
 ## Install
 
